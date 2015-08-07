@@ -1349,16 +1349,23 @@ class Bug(object):
         # no idea if this works on installations other than
         # bugzilla.mozilla.org. These flag numbers are specified at
         # https://api-dev.bugzilla.mozilla.org/latest/configuration.
+        # Note that the Firefox component for some reason uses a review flag with
+        # ID 748.  We submit both at the same time, and the server picks the one
+        # that applies to the component.
         review_flag = 4
+        firefox_review_flag = 748
         superreview_flag = 5
         feedback_flag = 607
         ui_review_flag = 203
         if review:
             if review[0] == ':me+':
                 fields['flag_type-%d' % review_flag] = '+'
+                fields['flag_type-%d' % firefox_review_flag] = '+'
             else:
                 fields['flag_type-%d' % review_flag] = '?'
+                fields['flag_type-%d' % firefox_review_flag] = '?'
                 fields['requestee_type-%d' % review_flag] = ",".join(review)
+                fields['requestee_type-%d' % firefox_review_flag] = ",".join(review)
         if superreview:
             if superreview[0] == ':me+':
                 fields['flag_type-%d' % superreview_flag] = '+'
