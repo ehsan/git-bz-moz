@@ -841,7 +841,13 @@ def edit_template(template):
     lines = filter(lambda x: not x.startswith("#"), f.readlines())
     f.close()
 
-    os.remove(filename)
+    # Save the last file in a known location in case we fail to attach the
+    # patch for some reason.
+    tmpdir = tempfile.gettempdir()
+    target = os.path.join(tmpdir, "git-bz-last.txt")
+    if os.path.exists(target):
+        os.remove(target)
+    os.rename(filename, target)
 
     return lines
 
