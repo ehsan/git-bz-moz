@@ -2348,71 +2348,6 @@ def do_file(*args):
     attach_commits(bug, commits, fill_comment=fill_comment,
                    edit=global_options.edit)
 
-def run_push(*args, **kwargs):
-    # Predicting what 'git pushes' pushes based on the command line
-    # would be extraordinarily complex, but the interactive output goes
-    # to stderr and is somewhat ambiguous. We do the best we can parsing
-    # it. git 1.6.4 adds --porcelain to push, so we can use that eventually.
-    dry = kwargs['dry'] if 'dry' in kwargs else False
-    options = dict()
-    if dry:
-        options['dry'] = True
-    if global_options.force:
-        options['force'] = True
-    try:
-        options['_return_stderr']=True
-        out, err = git.push(*args, **options)
-    except CalledProcessError:
-        return
-    if not dry:
-        # Echo the output so the user gets feedback about what happened
-        print >>sys.stderr, err
-
-    commits = []
-    for line in err.strip().split("\n"):
-        #
-        # We only look for updates of existing branches; a much more complex
-        # handling would be look for all commits that weren't pushed to a
-        # remote branch. Hopefully the typical use of 'git bz push' is pushing
-        # a single commit to master.
-        #
-        #                 e5ad33e..febe0d4             master  ->   master
-        m = re.match(r"^\s*([a-f0-9]{6,}..[a-f0-9]{6,})\s+\S+\s*->\s*\S+\s*$", line)
-        if m:
-            branch_commits = get_commits(m.group(1))
-            # Process from oldest to newest
-            branch_commits.reverse()
-            commits += branch_commits
-
-    # Remove duplicate commits
-    seen_commit_ids = set()
-    unique_commits = []
-    for commit in commits:
-        if not commit.id in seen_commit_ids:
-            seen_commit_ids.add(commit.id)
-            unique_commits.append(commit)
-
-    return unique_commits
-
-def do_push(*args):
-    if global_options.fix:
-        handle = BugHandle.parse_or_die(global_options.fix)
-        bug = Bug.load(handle)
-
-        # We need the user to confirm before we add the URLs to the commits
-        # We need to add the URLs to the commits before we push
-        # We need to push in order to find out what commits we are pushing
-        # So, we push --dry first
-        options = { 'dry' : True }
-        commits = run_push(*args, **options)
-        if edit_bug(bug, fix_commits=commits):
-            run_push(*args)
-    else:
-        unique_commits = run_push(*args)
-        for handle, commits in extract_and_collate_bugs(unique_commits):
-            bug = Bug.load(handle)
-            edit_bug(bug, commits)
-
 def do_components(*args):
     server = tracker_get_bug_server(get_tracker())
 
@@ -2503,16 +2438,8 @@ elif command == 'file':
     add_whitespace_option()
     min_args = 1
     max_args = 2
-elif command == 'push':
-    parser.set_usage("git bz push [options] [<repository> <refspec>...]");
-    add_add_url_options()
-    add_fix_option()
-    parser.add_option("-f", "--force", action="store_true",
-                      help="allow non-fast-forward commits")
-    min_args = 0
-    max_args = 1000 # no max
 else:
-    print >>sys.stderr, "Usage: git bz [add-url|apply|attach|components|edit|file|push] [options]"
+    print >>sys.stderr, "Usage: git bz [add-url|apply|attach|components|edit|file] [options]"
     sys.exit(1)
 
 global_options, args = parser.parse_args()
@@ -2536,7 +2463,5 @@ elif command == 'edit':
     do_edit(*args)
 elif command == 'file':
     do_file(*args)
-elif command == 'push':
-    do_push(*args)
 
 sys.exit(0)
