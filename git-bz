@@ -297,7 +297,7 @@ def get_add_url_method():
     try:
         return git.config('bz.add-url-method', get=True)
     except CalledProcessError:
-        return "body-append:%u"
+        return "subject-prepend:Bug %d -"
 
 def get_add_url_ignore_remote_commits():
     try:
