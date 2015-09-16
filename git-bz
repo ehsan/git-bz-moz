@@ -2292,14 +2292,13 @@ def do_file(*args):
     config = get_config(get_tracker())
 
     if product_component:
-        (product, component) = product_component.split("/", 1)
-
-        if component is None:
+        product_component_split = product_component.split("/", 1)
+        if len(product_component_split) == 1:
             product = None
             component = product_component
-
-        if not component:
-            die("'%s' is not a valid [<product>/]<component>" % product_component)
+        else:
+            assert len(product_component_split) == 2
+            (product, component) = product_component_split
 
         if not product:
             product = get_default_product()
@@ -2312,10 +2311,10 @@ def do_file(*args):
         component = get_default_component()
 
         if not product:
-            die("[<product>/]<component> not specified and no default product is configured"
+            die("[<product>/]<component> or revision not specified and no default product is configured"
                 + PRODUCT_COMPONENT_HELP)
         if not component:
-            die("[<product>/]<component> not specified and no default component is configured"
+            die("[<product>/]<component> or revision not specified and no default component is configured"
                 + PRODUCT_COMPONENT_HELP)
 
     commits = get_commits(commit_or_revision_range)
