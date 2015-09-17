@@ -62,7 +62,9 @@ default-priority = --
 ################################################################################
 
 import base64
+import bzauth
 import getpass
+import mercurial # for mercurial.error.Abort
 from optparse import OptionParser
 import os
 import re
@@ -664,11 +666,31 @@ class ShimMercurialUI:
 
 class BugServer(object):
     def __init__(self, host, path, https, auth_user=None, auth_password=None):
-        self.host = host
-        self.path = path
-        self.https = https
-        self.auth_user = auth_user
-        self.auth_password = auth_password
+        self.bugzilla = "%s://%s%s/" % ("https" if https else "http", host, path)
+        self.api_server = '%s/bzapi/' % self.bugzilla.rstrip('/')
+        self.ui = ShimMercurialUI()
+
+        # Ideally, have a config option to stop the message spam for people
+        # who prefer to enter things manually.
+        if not self.ui.config('bugzilla', 'username'):
+            print 'Your bugzilla username is not specified in your git config.'
+            print 'Set it by running:'
+            print '  git config --global bz.username <your username>'
+            print
+        if not self.ui.config('bugzilla', 'apikey'):
+            print 'No bugzilla API key is specified in your git config. This is the'
+            print 'preferred means of authentication, and other methods may break at'
+            print 'any time. An API key can be obtained here:'
+            print '  https://bugzilla.mozilla.org/userprefs.cgi?tab=apikey'
+            print 'Once obtained, set the API key by running:'
+            print '  git config --global bz.apikey <your bugzilla API key>'
+            print
+
+        try:
+            self.auth = bzauth.get_auth(self.ui, self.bugzilla, None)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
     def send_request(self, method, url, data=None, headers={}):
         die('unimplemented')
@@ -965,9 +987,8 @@ class Bug(object):
                                                                           response.status))
 
     def get_url(self):
-        return "%s://%s/show_bug.cgi?id=%d" % ("https" if self.server.https else "http",
-                                               self.server.host,
-                                               self.id)
+        return "%sshow_bug.cgi?id=%d" % (self.server.bugzilla, self.id)
+
 
     @staticmethod
     def load(bug_reference, attachmentdata=False):
