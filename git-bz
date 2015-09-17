@@ -507,6 +507,11 @@ class BugHandle:
 
         return BugHandle(host=host, path=path, https=https, id=id, auth_user=auth_user, auth_password=auth_password)
 
+    def get_bug_server(self):
+        return get_bug_server(self.host, self.path, self.https,
+                              self.auth_user, self.auth_password)
+
+
     @staticmethod
     def parse_or_die(str):
         try:
@@ -1164,6 +1169,14 @@ def get_bug_server(host, path, https, auth_user, auth_password):
 
     return servers[identifier]
 
+def tracker_get_bug_server(tracker):
+    host = resolve_host_alias(tracker)
+    path = tracker_get_path(tracker)
+    https = tracker_uses_https(tracker)
+    auth_user = tracker_get_auth_user(tracker)
+    auth_password = tracker_get_auth_password(tracker)
+    return get_bug_server(host, path, https, auth_user, auth_password)
+
 # Unfortunately, Bugzilla doesn't set a useful status code for
 # form posts.  Because it's very confusing to claim we succeeded
 # but not, we look for text in the response indicating success,
@@ -1472,7 +1485,7 @@ class Bug(object):
 
     @staticmethod
     def load(bug_reference, attachmentdata=False):
-        server = get_bug_server(bug_reference.host, bug_reference.path, bug_reference.https, bug_reference.auth_user, bug_reference.auth_password)
+        server = bug_reference.get_bug_server()
         bug = Bug(server)
         bug._load(bug_reference.id, attachmentdata)
 
@@ -1480,14 +1493,8 @@ class Bug(object):
 
     @staticmethod
     def create(tracker, product, component, short_desc, comment):
-        host = resolve_host_alias(tracker)
-        https = tracker_uses_https(tracker)
-        path = tracker_get_path(tracker)
-        auth_user = tracker_get_auth_user(tracker)
-        auth_password = tracker_get_auth_password(tracker)
+        server = tracker_get_bug_server(tracker)
         default_fields = get_default_fields(tracker)
-
-        server = get_bug_server(host, path, https, auth_user, auth_password)
         bug = Bug(server)
         bug._create(product, component, short_desc, comment, default_fields)
 
@@ -2444,14 +2451,7 @@ def do_push(*args):
             edit_bug(bug, commits)
 
 def do_components(*args):
-    tracker = get_tracker()
-    host = resolve_host_alias(tracker)
-    https = tracker_uses_https(tracker)
-    path = tracker_get_path(tracker)
-    auth_user = tracker_get_auth_user(tracker)
-    auth_password = tracker_get_auth_password(tracker)
-
-    server = get_bug_server(host, path, https, auth_user, auth_password)
+    server = tracker_get_bug_server(get_tracker())
 
     if len(args) == 1:
         product = args[0]
