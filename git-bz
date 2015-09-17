@@ -1914,7 +1914,7 @@ def attach_commits(bug, commits, fill_comment=True, edit=False, status='none'):
         # Prepend the author information in HG patch format.
         hgstring = '# HG changeset patch\n'
         hgstring += "# User " + commit_range.author + '\n\n'
-        patch = hgstring + patch
+        patch = hgstring + patch + '\n'
 
         bug.create_patch(description, comment, filename, patch, obsoletes=obsoletes, status=status, review=review, superreview=superreview, feedback=feedback, ui_review=ui_review)
 
