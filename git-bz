@@ -73,7 +73,6 @@ from subprocess import Popen, CalledProcessError, PIPE
 import sys
 import tempfile
 import time
-import urllib
 import urlparse
 import xmlrpclib
 from xml.etree.cElementTree import ElementTree
@@ -673,45 +672,8 @@ class BugServer(object):
     def get_xmlrpc_proxy(self):
         die('unimplemented')
 
-    def _product_id(self, product_name):
-        # This way works with newer bugzilla; older Bugzilla doesn't support names:
-        try:
-            response = self.get_xmlrpc_proxy().Product.get({ 'names': product_name, 'include_fields': ['id', 'name'] })
-            products = response['products']
-            if len(products) > 0:
-                return products[0]['id']
-        except xmlrpclib.Fault, e:
-            pass
-        except xmlrpclib.ProtocolError, e:
-            pass
-
-        # This should work with any bugzilla that supports xmlrpc, but will be slow
-        print >>sys.stderr, "Searching for product ID ...",
-        try:
-            response = self.get_xmlrpc_proxy().Product.get_accessible_products({})
-            ids = response['ids']
-            response = self.get_xmlrpc_proxy().Product.get_products({ 'ids': ids, 'include_fields': ['id', 'name']})
-            for p in response['products']:
-                if p['name'] == product_name:
-                    print >>sys.stderr, "found it"
-                    return p['id']
-        except xmlrpclib.Fault, e:
-            pass
-        except xmlrpclib.ProtocolError, e:
-            pass
-
-        print >>sys.stderr, "failed"
-        return None
-
     def product_id(self, product_name):
-        key = 'product_id_' + urllib.quote(product_name)
-        try:
-            return cache.get(self.host, key)
-        except IndexError:
-            value = self._product_id(product_name)
-            if value != None:
-                cache.set(self.host, key, value)
-            return value
+        die('unimplemented')
 
     # Query the server for the legal values of the given field; returns an
     # array, or None if the query failed
