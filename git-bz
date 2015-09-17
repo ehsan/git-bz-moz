@@ -1281,19 +1281,18 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
     for line in lines:
         # Capture a |Metadata:| formatted line and stuff it into the relevant
         # list
-        def append_matching_group(key, list, line, content_regexp='.+'):
+        def append_matching_group(key, retfn, line, content_regexp='.+'):
             match = re.match("^\s*%s\s*:\s*(%s)" % (key, content_regexp), line)
             if match:
-                list.append(match.group(1).strip())
+                retfn(match.group(1).strip())
                 return True
             return False
-
-        if append_matching_group("Obsoletes", obsoletes, line, content_regexp="[\d]+") or \
-           append_matching_group("Review", review, line) or \
-           append_matching_group("Super-Review", superreview, line) or \
-           append_matching_group("Feedback", feedback, line) or \
-           append_matching_group("ui-review", ui_review, line) or \
-           append_matching_group("Commit-Message", commit_message, line):
+        if append_matching_group("Obsoletes", obsoletes.append, line, content_regexp="[\d]+") or \
+           append_matching_group("Review", review.append, line) or \
+           append_matching_group("Super-Review", superreview.append, line) or \
+           append_matching_group("Feedback", feedback.append, line) or \
+           append_matching_group("ui-review", ui_review.append, line) or \
+           append_matching_group("Commit-Message", commit_message.append, line):
             continue
 
         # The Commit-Message: line delineates the break between the attachment
