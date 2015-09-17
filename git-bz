@@ -75,7 +75,6 @@ from subprocess import Popen, CalledProcessError, PIPE
 import sys
 import tempfile
 import urlparse
-from xml.etree.cElementTree import ElementTree
 
 
 # Globals
@@ -665,6 +664,23 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
+    def get_attachments(self, bugid, attachment_data=False):
+        try:
+            request = 'bug/%s/attachment' % bugid
+            if not attachment_data:
+                request = request + '?exclude_fields=data'
+            return self.auth.rest_request('GET', request)['bugs'][bugid]
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
+
+    def get_bug(self, bugid):
+        try:
+            return bz.get_bug(self.auth, bugid)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
+
     def get_product_components(self, product):
         try:
             request_string = 'product/{0}?include_fields=components.name'.format(product)
@@ -677,9 +693,6 @@ class BugServer(object):
         except mercurial.error.Abort, e:
             print 'Error:', e
             exit(-1)
-
-    def send_request(self, method, url, data=None, headers={}):
-        die('unimplemented')
 
     def send_post(self, url, fields, files=None):
         die('unimplemented')
@@ -707,6 +720,17 @@ def check_for_success(response, response_data, *args):
     die('unimplemented')
 
 
+class BugAttachment:
+    def __init__(self, raw_attachment):
+        self.attach_id = raw_attachment['id']
+        self.description = raw_attachment['summary']
+        self.flag_requestees = set(flag.get('requestee') for flag in raw_attachment['flags'])
+        if 'data' in raw_attachment:
+            self.data = base64.b64decode(raw_attachment['data'])
+        else:
+            self.data = None
+
+
 class Bug(object):
     def __init__(self, server):
         self.server = server
@@ -716,53 +740,23 @@ class Bug(object):
         self.short_desc = None
         self.patches = []
 
-    def _load(self, id, attachment_data=False):
-        url = "/show_bug.cgi?id=" + id + "&ctype=xml&format=default"
-        if not attachment_data:
-            url += "&excludefield=attachment_data"
-
-        response = self.server.send_request("GET", url)
-        if response.status != 200:
-            die ("Failed to retrieve bug information: %d" % response.status)
-
-        etree = ElementTree()
-        etree.parse(response)
-
-        bug = etree.find("bug")
-        error = bug.get("error")
-        if error != None:
-            die ("Failed to retrieve bug information: %s" % error)
-
-        self.id = int(bug.find("bug_id").text)
-        self.short_desc = bug.find("short_desc").text
-        self.bug_status = bug.find("bug_status").text
+    def _load(self, bugid, attachment_data=False):
+        buginfo = self.server.get_bug(bugid)
+        self.id = buginfo['id']
+        self.product = buginfo['product']
+        self.component = buginfo['component']
+        self.short_desc = buginfo['summary']
+        self.bug_status = buginfo['status']
         if self.bug_status == "RESOLVED":
-            self.resolution = bug.find("resolution").text
-        token = bug.find("token")
-        self.token = None if token is None else token.text
+            self.resolution = buginfo['resolution']
 
-        for attachment in bug.findall("attachment"):
-            if attachment.get("ispatch") == "1" and not attachment.get("isobsolete") == "1" :
-                attach_id = int(attachment.find("attachid").text)
-                patch = BugPatch(attach_id)
-                # We have to save fields we might not otherwise care about
-                # (like isprivate) so that we can pass them back when updating
-                # the attachment
-                patch.description = attachment.find("desc").text
-                patch.date = attachment.find("date").text
-                patch.filename = attachment.find("filename").text
-                patch.isprivate = attachment.get("isprivate") == "1"
-                token = attachment.find("token")
-                patch.token = None if token is None else token.text
-                patch.flag_requestees = set(flag.get("requestee") for flag in attachment.findall("flag"))
-
-                if attachment_data:
-                    data = attachment.find("data").text
-                    patch.data = base64.b64decode(data)
-                else:
-                    patch.data = None
-
-                self.patches.append(patch)
+        attachments = self.server.get_attachments(bugid, attachment_data=attachment_data)
+        for a in attachments:
+            if not a["is_patch"]:
+                continue
+            if a["is_obsolete"]:
+                continue
+            self.patches.append(BugAttachment(a))
 
     def get_attachment_token(self):
         die('unimplemented')
