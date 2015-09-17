@@ -640,10 +640,6 @@ class BugServer(object):
 
 servers = {}
 
-# Note that if we detect that we are redirecting, we may rewrite the
-# host/https of the server to avoid doing too many redirections, and
-# so the host,https we connect to may be different than what we use
-# to look up the server.
 def get_bug_server(host, path, https, auth_user, auth_password):
     identifier = (host, path, https)
     if not identifier in servers:
@@ -659,29 +655,9 @@ def tracker_get_bug_server(tracker):
     auth_password = tracker_get_auth_password(tracker)
     return get_bug_server(host, path, https, auth_user, auth_password)
 
-# Unfortunately, Bugzilla doesn't set a useful status code for
-# form posts.  Because it's very confusing to claim we succeeded
-# but not, we look for text in the response indicating success,
-# and not text indicating failure.
-#
-# We generally look for specific <title> tags - these have been
-# quite stable across versions, though translations will throw
-# us off.
-#
-# *args are regular expressions to search for in response_data
-# that indicate success. Returns the matched regular expression
-# on success, None otherwise
 def check_for_success(response, response_data, *args):
+    die('unimplemented')
 
-    if response.status != 200:
-        return False
-
-    for pattern in args:
-        m = re.search(pattern, response_data)
-        if m:
-            return m
-
-    return None
 
 class Bug(object):
     def __init__(self, server):
