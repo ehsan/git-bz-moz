@@ -446,7 +446,7 @@ class BugHandle:
     def get_url(self):
         return "%s://%s%s/show_bug.cgi?id=%s" % ("https" if self.https else "http",
                                                  self.host,
-                                                 self.path,
+                                                 self.path if self.path else "",
                                                  self.id)
 
     def needs_auth(self):
