@@ -675,31 +675,8 @@ class BugServer(object):
     def product_id(self, product_name):
         die('unimplemented')
 
-    # Query the server for the legal values of the given field; returns an
-    # array, or None if the query failed
-    def _legal_values(self, field):
-        try:
-            response = self.get_xmlrpc_proxy().Bug.legal_values({ 'field': field })
-            cache.set(self.host, 'legal_' + field, response['values'])
-            return response['values']
-        except xmlrpclib.Fault, e:
-            if e.faultCode == -32000: # https://bugzilla.mozilla.org/show_bug.cgi?id=513511
-                return None
-            raise
-        except xmlrpclib.ProtocolError, e:
-            if e.errcode == 500: # older bugzilla versions die this way
-                return None
-            elif e.errcode == 404: # really old bugzilla, no XML-RPC
-                return None
-            raise
-
     def legal_values(self, field):
-        try:
-            return cache.get(self.host, 'legal_' + field)
-        except IndexError:
-            values = self._legal_values(field)
-            cache.set(self.host, 'legal_' + field, values)
-            return values
+        die('unimplemented')
 
 
 servers = {}
