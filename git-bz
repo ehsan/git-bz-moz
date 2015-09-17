@@ -62,6 +62,7 @@ default-priority = --
 ################################################################################
 
 import base64
+import getpass
 from optparse import OptionParser
 import os
 import re
@@ -611,8 +612,55 @@ class BugPatch(object):
     def __init__(self, attach_id):
         self.attach_id = attach_id
 
+
 class NoXmlRpcError(Exception):
     pass
+
+
+class ShimMercurialUI:
+    def config(self, key1, key2, default=None):
+        if key1 != 'bugzilla':
+            print 'Expected bugzilla for first argument to config.'
+            exit(-1)
+        try:
+            return git.config('bz.' + key2, get=True)
+        except CalledProcessError:
+            return default
+
+    def configlist(self, key1, key2, arg3):
+        if key1 != 'bugzilla':
+            print 'Expected bugzilla for first argument to configlist.'
+            exit(-1)
+        if key2 != 'firefoxprofile':
+            print 'Expected firefoxprofile for second argument to configlist.'
+            exit(-1)
+        if len(arg3) != 0:
+            print 'Expected [] for third argument to configlist.'
+        # Don't try to support this.
+        return None
+
+    def debug(self, msg):
+        print 'Debug:', msg
+
+    def getpass(self, message, default=None):
+        return getpass.getpass(message)
+
+    def prompt(self, message, default=None):
+        sys.stdout.write(message + ' ')
+        line = sys.stdin.readline().strip()
+        if line == '':
+            return default
+        return line
+
+    def warn(self, msg):
+        print 'Warn:', msg
+
+    def write(self, msg):
+        print msg
+
+    def write_err(self, msg):
+        print 'Error:', msg
+
 
 class BugServer(object):
     def __init__(self, host, path, https, auth_user=None, auth_password=None):
