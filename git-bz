@@ -1997,41 +1997,9 @@ def do_attach(*args):
 
     attach_commits(bug, commits, edit=global_options.edit)
 
-# Sort the patches in the bug into categories based on a set of Git
-# git commits that we're considering to be newly applied. Matching
-# is done on exact git subject <=> patch description matches.
-def filter_patches(bug, applied_commits):
-    newly_applied_patches = dict() # maps to the commit object where it was applied
-    obsoleted_patches = set()
-    unapplied_patches = set()
-
-    applied_subjects = dict(((commit.subject, commit) for commit in applied_commits))
-    seen_subjects = set()
-
-    # Work backwards so that the latest patch is considered applied, and older
-    # patches with the same subject obsoleted.
-    for patch in reversed(bug.patches):
-        # Previously committted or rejected patches are never a match
-        if patch.status == "committed" or patch.status == "rejected":
-            continue
-
-        if patch.description in seen_subjects:
-            obsoleted_patches.add(patch)
-        elif patch.description in applied_subjects:
-            newly_applied_patches[patch] = applied_subjects[patch.description]
-            seen_subjects.add(patch)
-        else:
-            unapplied_patches.add(patch)
-
-    return newly_applied_patches, obsoleted_patches, unapplied_patches
-
-def edit_bug(bug, applied_commits=None, fix_commits=None):
-    if applied_commits is not None:
-        newly_applied_patches, obsoleted_patches, unapplied_patches = filter_patches(bug, applied_commits)
-        mark_resolved = len(unapplied_patches) == 0 and bug.bug_status != "RESOLVED"
-    else:
-        newly_applied_patches = obsoleted_patches = set()
-        mark_resolved = fix_commits is not None
+def edit_bug(bug, fix_commits=None):
+    newly_applied_patches = obsoleted_patches = set()
+    mark_resolved = fix_commits is not None
 
     template = StringIO()
     template.write("# Bug %d - %s - %s" % (bug.id, bug.short_desc, bug.bug_status))
@@ -2256,8 +2224,6 @@ def extract_and_collate_bugs(commits):
 def do_edit(bug_reference_or_revision_range):
     try:
         handle = BugHandle.parse(bug_reference_or_revision_range)
-        if global_options.pushed:
-            die("--pushed can't be used together with a bug reference")
         if global_options.fix is not None:
             die("--fix requires commits to be specified")
         bug = Bug.load(handle)
@@ -2277,10 +2243,7 @@ def do_edit(bug_reference_or_revision_range):
             commits.reverse()
             for handle, commits in extract_and_collate_bugs(commits):
                 bug = Bug.load(handle)
-                if global_options.pushed:
-                    edit_bug(bug, applied_commits=commits)
-                else:
-                    edit_bug(bug)
+                edit_bug(bug)
 
 PRODUCT_COMPONENT_HELP = """
 
@@ -2530,8 +2493,6 @@ elif command == 'components':
     max_args = 1
 elif command == 'edit':
     parser.set_usage("git bz edit [options] (<bug reference> | <commit> | <revision range>)");
-    parser.add_option("", "--pushed", action="store_true",
-                      help="pre-fill edit form treating the commits as pushed")
     add_add_url_options()
     add_fix_option()
     min_args = max_args = 1
@@ -2572,8 +2533,6 @@ elif command == 'attach':
 elif command == 'components':
     do_components(*args)
 elif command == 'edit':
-    if global_options.pushed:
-        exit
     do_edit(*args)
 elif command == 'file':
     do_file(*args)
