@@ -67,23 +67,24 @@ from ConfigParser import RawConfigParser, NoOptionError
 import httplib
 from optparse import OptionParser
 import os
+import platform
+import re
+import shutil
 try:
     from sqlite3 import dbapi2 as sqlite
 except ImportError:
     from pysqlite2 import dbapi2 as sqlite
-import re
+from splitreviewer import split_reviewer
 from StringIO import StringIO
 from subprocess import Popen, CalledProcessError, PIPE
-import shutil
 import sys
 import tempfile
 import time
-import xmlrpclib
 import urllib
 import urlparse
+import xmlrpclib
 from xml.etree.cElementTree import ElementTree
-import platform
-from splitreviewer import split_reviewer
+
 
 # Globals
 # =======
