@@ -2030,11 +2030,12 @@ def edit_bug(bug):
         m = re.match("^\s*(\S+)\s*@\s*(\d+)", line)
         if m:
             status = m.group(1)
-            changed_attachments[int(m.group(2))] = status
-            return False
+            if status == 'obsolete':
+                obsoleted_attachments.append(int(m.group(2)))
+                return False
         return True
 
-    changed_attachments = {}
+    obsoleted_attachments = []
     resolutions = []
 
     lines = filter(filter_line, lines)
@@ -2042,7 +2043,7 @@ def edit_bug(bug):
     comment = "".join(lines).strip()
     resolution = resolutions[0] if len(resolutions) > 0 else None
 
-    if resolution is None and len(changed_attachments) == 0 and comment == "":
+    if resolution is None and len(obsoleted_attachments) == 0 and comment == "":
         print "No changes, not editing Bug %d - %s" % (bug.id, bug.short_desc)
         return False
 
@@ -2057,7 +2058,7 @@ def edit_bug(bug):
         bug_changes['resolution'] = resolution
 
     if comment != "":
-        if len(bug_changes) == 0 and len(changed_attachments) == 1:
+        if len(bug_changes) == 0 and len(obsoleted_attachments) == 1:
             # We can add the comment when we submit the attachment change.
             # Bugzilla will add a helpful notation ad we'll only send out
             # one set of email
@@ -2072,11 +2073,9 @@ def edit_bug(bug):
     if len(bug_changes) > 0:
         bug.update(**bug_changes)
 
-    for (attachment_id, status) in changed_attachments.iteritems():
+    for attachment_id in obsoleted_attachments:
         patch = None
-        if status != "obsolete":
-            die("Can't mark patch as '%s'; only obsolete is supported on %s" % (status,
-                                                                                bug.server.host))
+
         for p in bug.patches:
             if p.attach_id == attachment_id:
                 patch = p
@@ -2091,8 +2090,8 @@ def edit_bug(bug):
 
     if resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
-    elif len(changed_attachments) > 0:
-        print "Updated bug %d - %s" % (bug.id, bug.short_desc)
+    elif len(obsoleted_attachments) > 0:
+        print "Obsoleted attachments on bug %d - %s" % (bug.id, bug.short_desc)
     else:
         print "Added comment to bug %d - %s" % (bug.id, bug.short_desc)
     print bug.get_url()
