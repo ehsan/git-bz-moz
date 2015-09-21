@@ -694,10 +694,34 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
-    def send_post(self, url, fields, files=None):
-        die('unimplemented')
+    def legal_field_values(self, field_name):
+        # XXX Should cache this.
+        vals = self.auth.rest_request('GET', 'field/bug/' + field_name + '?include_fields=values')
+        vals = vals['fields'][0]['values']
+        return [x['name'] for x in vals]
 
-    def legal_values(self, field):
+    # Note that if a comment is given when obsoleting multiple attachments,
+    # the comment will be posted repeatedly. See bug 1206797.
+    def obsolete_attachments_by_id(self, attachment_ids, comment=''):
+        if not attachment_ids:
+            return
+        try:
+            o = {
+                'ids': attachment_ids,
+                'is_obsolete': True,
+            }
+            if comment:
+                o['comment'] = comment
+
+            return self.auth.rest_request('PUT', 'bug/attachment/%s' % attachment_ids[0], data=o)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
+
+    def update_bug(self, bug_id, changes):
+        bz.update_bug(self.auth, bug_id, changes)
+
+    def send_post(self, url, fields, files=None):
         die('unimplemented')
 
 
@@ -907,60 +931,11 @@ class Bug(object):
 
         print "Attached %s" % filename
 
-    # Update specified fields of a bug; keyword arguments are interpreted
-    # as field_name=value
-    def update(self, **changes):
-        changes['id'] = str(self.id)
-        if self.token:
-            changes['token'] = self.token
-        # Since we don't send delta_ts we'll never get a mid-air collision
-        # This is probably a good thing
-
-        response = self.server.send_post("/process_bug.cgi", changes)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 r"<title>\s*Bug[\S\s]*processed\s*</title>"):
-
-            # Mid-air collisions would be indicated by
-            # "<title>Mid-air collision!</title>"
-
-            print response_data
-            die ("Failed to update bug %d, status=%d" % (self.id, response.status))
-
-    # Update specified fields of an attachment; keyword arguments are
-    # interpreted as field_name=value
-    def update_patch(self, patch, **changes):
-        # Unlike /process_bug.cgi, the attachment editing interface doesn't
-        # support defaulting missing fields to their existing values, so we
-        # have to pass everything back.
-        fields = {
-            'action': 'update',
-            'id': str(patch.attach_id),
-            'description': patch.description,
-            'filename': patch.filename,
-            'ispatch': "1",
-            'isobsolete': "0",
-            'isprivate': "1" if patch.isprivate else "0",
-        };
-
-        if patch.token:
-            fields['token'] = patch.token
-
-        for (field, value) in changes.iteritems():
-            fields[field] = value
-
-        response = self.server.send_post("/attachment.cgi", fields)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 r"<title>\s*Changes\s+Submitted"):
-            print response_data
-            die ("Failed to update attachment %d to bug %d, status=%d" % (patch.attach_id,
-                                                                          self.id,
-                                                                          response.status))
-
     def get_url(self):
         return "%sshow_bug.cgi?id=%d" % (self.server.bugzilla, self.id)
 
+    def update(self, changes):
+        self.server.update_bug(self.id, changes)
 
     @staticmethod
     def load(bug_reference, attachment_data=False):
@@ -1492,7 +1467,7 @@ def edit_bug(bug):
         template.write("# Uncommment and edit to change resolution\n")
     else:
         template.write("# Uncomment to resolve bug\n")
-    legal_resolutions = bug.server.legal_values('resolution')
+    legal_resolutions = bug.server.legal_field_values('resolution')
     if legal_resolutions:
         # Require non-empty resolution. DUPLICATE, MOVED would need special support
         legal_resolutions = [x for x in legal_resolutions if x not in ('', 'DUPLICATE', 'MOVED')]
@@ -1540,39 +1515,24 @@ def edit_bug(bug):
                 resolution = expand_abbreviation(resolution, legal_resolutions)
             except ValueError:
                 die("Bad resolution: %s" % resolution)
-        bug_changes['bug_status'] = 'RESOLVED'
         bug_changes['resolution'] = resolution
 
-    if comment != "":
-        if len(bug_changes) == 0 and len(obsoleted_attachments) == 1:
-            # We can add the comment when we submit the attachment change.
-            # Bugzilla will add a helpful notation ad we'll only send out
-            # one set of email
-            pass # We'll put the comment with the attachment
-        else:
-            bug_changes['comment'] = comment
+    if comment:
+        # If we're updating the bug anyways, add the comment at the
+        # same time. If we're obsoleting multiple attachments at once,
+        # add the comment separately so that it isn't added once per
+        # attachment. See bug 1206797. Finally, if we are only adding
+        # a comment, make sure we update the bug.
+        if bug_changes or len(obsoleted_attachments) != 1:
+            bug_changes['comment'] = { 'body': comment }
+            comment = ''
 
-    # If we did the attachment updates first, we'd have to fetch a new
-    # token hash for the bug, since they'll change it. But each attachment
-    # has an individual token hash for just that attachment, so we can
-    # do the attachment updates afterwards.
-    if len(bug_changes) > 0:
-        bug.update(**bug_changes)
+    if bug_changes:
+        bug.update(bug_changes)
 
-    for attachment_id in obsoleted_attachments:
-        patch = None
-
-        for p in bug.patches:
-            if p.attach_id == attachment_id:
-                patch = p
-        if not patch:
-            die("%d is not a valid attachment ID for Bug %d" % (attachment_id, bug.id))
-        attachment_changes = {}
-        if comment != "" and not 'comment' in bug_changes: # See above
-            attachment_changes['comment'] = comment
-        attachment_changes['isobsolete'] = "1"
-        bug.update_patch(patch, **attachment_changes)
-        print "Marked attachment as obsolete: %s - %s " % (patch.attach_id, patch.description)
+    if obsoleted_attachments:
+        assert len(obsoleted_attachments) == 1 or not comment
+        bug.server.obsolete_attachments_by_id(obsoleted_attachments, comment)
 
     if resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
