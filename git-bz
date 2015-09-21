@@ -59,11 +59,15 @@ https = true
 default-priority = --
 """
 
+CONFIG_CACHE_FILENAME = ".gitbz.ini.cache"
+
+
 ################################################################################
 
 import base64
 import bz
 import bzauth
+import bzexport
 import getpass
 import mercurial # for mercurial.error.Abort
 from optparse import OptionParser
@@ -664,6 +668,12 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
+    def flag_type_id(self, bug, flag_name):
+        assert not bug.product is None
+        assert not bug.component is None
+        return bzexport.flag_type_id(self.ui, self.api_server, CONFIG_CACHE_FILENAME,
+                                     flag_name, bug.product, bug.component)
+
     def get_attachments(self, bugid, attachment_data=False):
         try:
             request = 'bug/%s/attachment' % bugid
@@ -720,6 +730,12 @@ class BugServer(object):
 
     def update_bug(self, bug_id, changes):
         bz.update_bug(self.auth, bug_id, changes)
+
+    def validate_users(self, requestee_list, flag_name):
+        valid_users = bzexport.validate_users(self.ui, self.api_server, self.auth,
+                                              requestee_list, bzexport.multi_user_prompt,
+                                              flag_name + 'er')
+        return bzexport.select_users(valid_users, requestee_list)
 
     def send_post(self, url, fields, files=None):
         die('unimplemented')
@@ -787,9 +803,6 @@ class Bug(object):
             if a["is_obsolete"]:
                 continue
             self.patches.append(BugAttachment(a))
-
-    def get_attachment_token(self):
-        die('unimplemented')
 
     def _create_via_xmlrpc(self, product, component, short_desc, comment, default_fields):
         params = dict()
@@ -864,77 +877,46 @@ class Bug(object):
         print self.get_url()
 
     def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
-        fields = {}
-        fields['bugid'] = str(self.id)
-        token = self.get_attachment_token()
-        if token:
-          fields['token'] = token
-        fields['action'] = 'insert'
-        fields['ispatch'] = '1'
-        fields['description'] = description
+        o = {
+            'ids': [self.id],
+            'summary': description,
+            'file_name': filename,
+            'data': base64.b64encode(data),
+            'encoding': 'base64',
+            'content_type': 'text/plain',
+            'is_patch': True,
+            'flags': [],
+        }
+
         if comment:
-            fields['comment'] = comment
-        if obsoletes:
-            # this will produce multiple parts in the encoded data with the
-            # name 'obsolete' for each item in the list
-            fields['obsolete'] = map(str, obsoletes)
+            o['comment'] = comment
 
-        # Support for flagging for review/superreview/feedback/ui-review. I have
-        # no idea if this works on installations other than
-        # bugzilla.mozilla.org. These flag numbers are specified at
-        # https://api-dev.bugzilla.mozilla.org/latest/configuration.
-        # Note that the Firefox component for some reason uses a review flag with
-        # ID 748.  We submit both at the same time, and the server picks the one
-        # that applies to the component.
-        review_flag = 4
-        firefox_review_flag = 748
-        superreview_flag = 5
-        feedback_flag = 607
-        ui_review_flag = 203
-        die('flag code not updated for the new combined format')
-        if review:
-            if review[0] == ':me+':
-                fields['flag_type-%d' % review_flag] = '+'
-                fields['flag_type-%d' % firefox_review_flag] = '+'
-            else:
-                fields['flag_type-%d' % review_flag] = '?'
-                fields['flag_type-%d' % firefox_review_flag] = '?'
-                fields['requestee_type-%d' % review_flag] = ",".join(review)
-                fields['requestee_type-%d' % firefox_review_flag] = ",".join(review)
-        if superreview:
-            if superreview[0] == ':me+':
-                fields['flag_type-%d' % superreview_flag] = '+'
-            else:
-                fields['flag_type-%d' % superreview_flag] = '?'
-                fields['requestee_type-%d' % superreview_flag] = ",".join(superreview)
-        if feedback:
-            if feedback[0] == ':me+':
-                fields['flag_type-%d' % feedback_flag] = '+'
-            else:
-                fields['flag_type-%d' % feedback_flag] = '?'
-                fields['requestee_type-%d' % feedback_flag] = ",".join(feedback)
-        if ui_review:
-            if ui_review[0] == ':me+':
-                fields['flag_type-%d' % ui_review_flag] = '+'
-            else:
-                fields['flag_type-%d' % ui_review_flag] = '?'
-                fields['requestee_type-%d' % ui_review_flag] = ",".join(ui_review)
+        for flag_name, flag_values in patch_flags.iteritems():
+            requestee_list = self.server.validate_users(flag_values.requestees, flag_name)
+            if requestee_list is None:
+                die('Invalid reviewer(s).')
 
-        files = { 'data': (filename, 'text/plain; charset=UTF-8', data) }
+            flag_id = self.server.flag_type_id(self, flag_name)
 
-        response = self.server.send_post("/attachment.cgi", fields, files)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 # Older bugzilla's used this for successful attachments
-                                 r"<title>\s*Changes\s+Submitted",
-                                 # Newer bugzilla's, use, instead:
-                                 r"<title>\s*Attachment\s+\d+\s+added"):
-            response_match = re.search("<title>([^<]+)</title>", response_data)
-            if response_match:
-                print 'Error response from bugzilla:', response_match.group(1)
-            else:
-                print 'Error response from bugzilla.'
-            die ("Failed to attach patch to bug %d, status=%d" % (self.id, response.status))
+            if not flag_values.status is None:
+                o['flags'].append({
+                    'name': flag_name,
+                    'type_id': flag_id,
+                    'status': flag_values.status,
+                })
+
+            for requestee in requestee_list:
+                o['flags'].append({
+                    'name': flag_name,
+                    'type_id': flag_id,
+                    'status': '?',
+                    'requestee': requestee,
+                })
+
+        self.server.auth.rest_request('POST', 'bug/%s/attachment' % self.id, data=o)
+
+        # It would be better if we could do this in the same request.
+        self.server.obsolete_attachments_by_id(obsoletes)
 
         print "Attached %s" % filename
 
