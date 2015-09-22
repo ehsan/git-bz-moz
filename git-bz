@@ -716,10 +716,10 @@ class Bug(object):
         self.short_desc = None
         self.patches = []
 
-    def _load(self, id, attachmentdata=False):
+    def _load(self, id, attachment_data=False):
         url = "/show_bug.cgi?id=" + id + "&ctype=xml&format=default"
-        if not attachmentdata:
-            url += "&excludefield=attachmentdata"
+        if not attachment_data:
+            url += "&excludefield=attachment_data"
 
         response = self.server.send_request("GET", url)
         if response.status != 200:
@@ -756,7 +756,7 @@ class Bug(object):
                 patch.token = None if token is None else token.text
                 patch.flag_requestees = set(flag.get("requestee") for flag in attachment.findall("flag"))
 
-                if attachmentdata:
+                if attachment_data:
                     data = attachment.find("data").text
                     patch.data = base64.b64decode(data)
                 else:
@@ -969,10 +969,10 @@ class Bug(object):
 
 
     @staticmethod
-    def load(bug_reference, attachmentdata=False):
+    def load(bug_reference, attachment_data=False):
         server = bug_reference.get_bug_server()
         bug = Bug(server)
-        bug._load(bug_reference.id, attachmentdata)
+        bug._load(bug_reference.id, attachment_data)
 
         return bug
 
@@ -1194,7 +1194,7 @@ def requestee_match(requestees):
 
 def do_apply(bug_reference):
     bug = Bug.load(BugHandle.parse_or_die(bug_reference),
-                   attachmentdata=True)
+                   attachment_data=True)
 
     print "Bug %d - %s" % (bug.id, bug.short_desc)
     print
