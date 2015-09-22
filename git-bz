@@ -62,6 +62,7 @@ default-priority = --
 ################################################################################
 
 import base64
+import bz
 import bzauth
 import getpass
 import mercurial # for mercurial.error.Abort
@@ -74,7 +75,6 @@ from subprocess import Popen, CalledProcessError, PIPE
 import sys
 import tempfile
 import urlparse
-import xmlrpclib
 from xml.etree.cElementTree import ElementTree
 
 
@@ -665,16 +665,23 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
+    def get_product_components(self, product):
+        try:
+            request_string = 'product/{0}?include_fields=components.name'.format(product)
+            product_info = self.auth.rest_request('GET', request_string)['products']
+            assert len(product_info) == 1
+            component_info = product_info[0]['components']
+            component_list = [x['name'] for x in component_info]
+            component_list.sort()
+            return component_list
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
+
     def send_request(self, method, url, data=None, headers={}):
         die('unimplemented')
 
     def send_post(self, url, fields, files=None):
-        die('unimplemented')
-
-    def get_xmlrpc_proxy(self):
-        die('unimplemented')
-
-    def product_id(self, product_name):
         die('unimplemented')
 
     def legal_values(self, field):
@@ -1761,19 +1768,10 @@ def do_components(*args):
         if not product:
             die("<product> not specified and no default product is configured" + PRODUCT_COMPONENT_HELP)
 
-    product_id = server.product_id(product)
-    if product_id is None:
-        die("No such product " + product)
+    components = server.get_product_components(product)
+    for c in components:
+        print c
 
-    try:
-        response = server.get_xmlrpc_proxy().Bug.legal_values({'product_id': product_id, 'field': 'component'})
-        components = response['values']
-        for component in components:
-            print component
-    except xmlrpclib.Fault, e:
-        die(e.faultString)
-    except xmlrpclib.ProtocolError, e:
-        die("Unable to retrieve components: %s" % e.errmsg)
 
 ################################################################################
 
