@@ -374,18 +374,6 @@ def tracker_get_path(tracker):
         return config['path']
     return ""
 
-def tracker_get_auth_user(tracker):
-    config = get_config(tracker)
-    if 'auth-user' in config:
-        return config['auth-user']
-    return None
-
-def tracker_get_auth_password(tracker):
-    config = get_config(tracker)
-    if 'auth-password' in config:
-        return config['auth-password']
-    return None
-
 def get_default_fields(tracker):
     config = get_config(tracker)
 
@@ -408,13 +396,11 @@ class BugParseError(Exception):
 # uniquely identifies a bug on a server, though until we try
 # to load it (and create a Bug) we don't know if it actually exists.
 class BugHandle:
-    def __init__(self, host, path, https, id, auth_user=None, auth_password=None):
+    def __init__(self, host, path, https, id):
         self.host = host
         self.path = path
         self.https = https
         self.id = id
-        self.auth_user = auth_user
-        self.auth_password = auth_password
 
         # ensure that the path to the bugzilla installation is an absolute path
         # so that it will still work even if their config option specifies
@@ -431,9 +417,6 @@ class BugHandle:
                                                  self.path if self.path else "",
                                                  self.id)
 
-    def needs_auth(self):
-        return self.auth_user and self.auth_password
-
     @staticmethod
     def parse(bug_reference):
         parseresult = urlparse.urlsplit (bug_reference)
@@ -443,15 +426,10 @@ class BugHandle:
             if len(parseresult.path) == 0 or parseresult.path[0] != '/' or parseresult.hostname is None:
                 raise BugParseError("Invalid bug reference '%s'" % bug_reference)
 
-            user = parseresult.username
-            password = parseresult.password
-            # if the url did not specify http auth credentials in the form
-            # https://user:password@host.com, check to see whether the config file
-            # specifies any auth credentials for this host
-            if not user:
-                user = tracker_get_auth_user(parseresult.hostname)
-            if not password:
-                password = tracker_get_auth_password(parseresult.hostname)
+            if parseresult.username:
+                print 'Ignoring user name in URL.'
+            if parseresult.password:
+                print 'Ignoring password in URL.'
 
             # strip off everything after the last '/', so '/bugzilla/show_bug.cgi'
             # will simply become '/bugzilla'
@@ -462,9 +440,7 @@ class BugHandle:
                 return BugHandle(host=parseresult.hostname,
                                  path=base_path,
                                  https=parseresult.scheme=="https",
-                                 id=m.group(1),
-                                 auth_user=user,
-                                 auth_password=password)
+                                 id=m.group(1))
 
         colon = bug_reference.find(":")
         if colon > 0:
@@ -480,17 +456,14 @@ class BugHandle:
         host = resolve_host_alias(tracker)
         https = tracker_uses_https(tracker)
         path = tracker_get_path(tracker)
-        auth_user = tracker_get_auth_user(tracker)
-        auth_password = tracker_get_auth_password(tracker)
 
         if not re.match(r"^.*\.[a-zA-Z]{2,}$", host):
             raise BugParseError("'%s' doesn't look like a valid bugzilla host or alias" % host)
 
-        return BugHandle(host=host, path=path, https=https, id=id, auth_user=auth_user, auth_password=auth_password)
+        return BugHandle(host=host, path=path, https=https, id=id)
 
     def get_bug_server(self):
-        return get_bug_server(self.host, self.path, self.https,
-                              self.auth_user, self.auth_password)
+        return get_bug_server(self.host, self.path, self.https)
 
 
     @staticmethod
@@ -665,7 +638,7 @@ class ShimMercurialUI:
 
 
 class BugServer(object):
-    def __init__(self, host, path, https, auth_user=None, auth_password=None):
+    def __init__(self, host, path, https):
         self.bugzilla = "%s://%s%s/" % ("https" if https else "http", host, path)
         self.api_server = '%s/bzapi/' % self.bugzilla.rstrip('/')
         self.ui = ShimMercurialUI()
@@ -710,10 +683,10 @@ class BugServer(object):
 
 servers = {}
 
-def get_bug_server(host, path, https, auth_user, auth_password):
+def get_bug_server(host, path, https):
     identifier = (host, path, https)
     if not identifier in servers:
-        servers[identifier] = BugServer(host, path, https, auth_user, auth_password)
+        servers[identifier] = BugServer(host, path, https)
 
     return servers[identifier]
 
@@ -721,9 +694,7 @@ def tracker_get_bug_server(tracker):
     host = resolve_host_alias(tracker)
     path = tracker_get_path(tracker)
     https = tracker_uses_https(tracker)
-    auth_user = tracker_get_auth_user(tracker)
-    auth_password = tracker_get_auth_password(tracker)
-    return get_bug_server(host, path, https, auth_user, auth_password)
+    return get_bug_server(host, path, https)
 
 def check_for_success(response, response_data, *args):
     die('unimplemented')
