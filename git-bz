@@ -591,10 +591,6 @@ class BugPatch(object):
         self.attach_id = attach_id
 
 
-class NoXmlRpcError(Exception):
-    pass
-
-
 class ShimMercurialUI:
     def config(self, key1, key2, default=None):
         if key1 != 'bugzilla':
@@ -668,6 +664,10 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
+    def create_bug(self, bug_fields):
+        response = self.auth.rest_request('POST', 'bug', data=bug_fields)
+        return response['id']
+
     def flag_type_id(self, bug, flag_name):
         assert not bug.product is None
         assert not bug.component is None
@@ -737,9 +737,6 @@ class BugServer(object):
                                               flag_name + 'er')
         return bzexport.select_users(valid_users, requestee_list)
 
-    def send_post(self, url, fields, files=None):
-        die('unimplemented')
-
 
 servers = {}
 
@@ -755,9 +752,6 @@ def tracker_get_bug_server(tracker):
     path = tracker_get_path(tracker)
     https = tracker_uses_https(tracker)
     return get_bug_server(host, path, https)
-
-def check_for_success(response, response_data, *args):
-    die('unimplemented')
 
 
 class BugAttachment:
@@ -803,78 +797,6 @@ class Bug(object):
             if a["is_obsolete"]:
                 continue
             self.patches.append(BugAttachment(a))
-
-    def _create_via_xmlrpc(self, product, component, short_desc, comment, default_fields):
-        params = dict()
-        params['product'] = product
-        params['component'] = component
-        params['summary'] = short_desc
-        params['description'] = comment
-        for (field, value) in default_fields.iteritems():
-            params[field] = value
-
-        try:
-            response = self.server.get_xmlrpc_proxy().Bug.create(params)
-            self.id = response['id']
-        except xmlrpclib.Fault, e:
-            die(e.faultString)
-        except xmlrpclib.ProtocolError, e:
-            if e.errcode == 404:
-                raise NoXmlRpcError(e.errmsg)
-            else:
-                print >>sys.stderr, "Problem filing bug via XML-RPC: %s (%d)\n" % (e.errmsg, e.errcode)
-                print >>sys.stderr, "falling back to form post\n"
-                raise NoXmlRpcError("Communication error")
-
-    def _create_with_form(self, product, component, short_desc, comment, default_fields):
-        fields = dict()
-        fields['product'] = product
-        fields['component'] = component
-        fields['short_desc'] = short_desc
-        fields['comment'] = comment
-
-        # post_bug.cgi wants some names that are less congenial than the names
-        # expected in XML-RPC.
-        for (field, value) in default_fields.iteritems():
-            if field == 'severity':
-                field = 'bug_severity'
-            elif field == 'platform':
-                field = 'rep_platform'
-            fields[field] = value
-
-        # Priority values vary wildly between different servers because the stock
-        # Bugzilla uses the awkward P1/../P5. It will be defaulted on the XML-RPC
-        # code path, but we need to take a wild guess here.
-        if not 'priority' in fields:
-            fields['priority'] = 'P5'
-        # Legal severity values are much more standardized, but not specifying it
-        # in the XML-RPC code path allows the server default to win. We need to
-        # specify something here.
-        if not 'severity' in fields:
-            fields['bug_severity'] = 'normal'
-        # Required, but a configured default doesn't make any sense
-        if not 'bug_file_loc' in fields:
-            fields['bug_file_loc'] = ''
-
-        response = self.server.send_post("/post_bug.cgi", fields)
-        response_data = response.read()
-        m = check_for_success(response, response_data,
-                              r"<title>\s*Bug\s+([0-9]+)")
-        if not m:
-            print response_data
-            die("Failed to create bug, status=%d" % response.status)
-
-        self.id = int(m.group(1))
-
-    def _create(self, product, component, short_desc, comment, default_fields):
-        try:
-            self._create_via_xmlrpc(product, component, short_desc, comment, default_fields)
-        except NoXmlRpcError:
-            self._create_with_form(product, component, short_desc, comment, default_fields)
-
-        print "Successfully created"
-        print "Bug %d - %s" % (self.id, short_desc)
-        print self.get_url()
 
     def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
         o = {
@@ -935,13 +857,51 @@ class Bug(object):
         return bug
 
     @staticmethod
-    def create(tracker, product, component, short_desc, comment):
+    def create(tracker, product, component, summary, description):
         server = tracker_get_bug_server(tracker)
         default_fields = get_default_fields(tracker)
+
+        # Create the bug in Bugzilla.
+        bug_fields = {}
+        for k, v in default_fields.iteritems():
+            bug_fields[k] = v
+
+        bug_fields['product'] = product
+        bug_fields['component'] = component
+        bug_fields['summary'] = summary
+        bug_fields['description'] = description
+
+        bug_id = server.create_bug(bug_fields)
+
+        print "Successfully created"
+
+        # Create a Bug object for the bug we just created in Bugzilla.
+        # We fill this in using the information we used to create the
+        # bug rather than query the server because it is faster.
         bug = Bug(server)
-        bug._create(product, component, short_desc, comment, default_fields)
+        bug.id = bug_id
+        bug.product = product
+        bug.component = component
+        bug.short_desc = summary.rstrip()
+
+        # bug.bug_status and bug.resolution are not set. We can't tell
+        # if bug_status is UNCONFIRMED or NEW. Hopefully neither will
+        # be needed.
+
+        if False:
+            # Debugging check that we are setting values that match the server.
+            bug2 = Bug(server)
+            bug2._load(str(bug_id))
+            assert bug.id == bug2.id
+            assert bug.product == bug2.product
+            assert bug.component == bug2.component
+            assert bug.short_desc == bug2.short_desc
+
+        print "Bug %d - %s" % (bug.id, summary)
+        print bug.get_url()
 
         return bug
+
 
 # The Commands
 # =============
