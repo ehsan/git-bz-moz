@@ -59,31 +59,26 @@ https = true
 default-priority = --
 """
 
+CONFIG_CACHE_FILENAME = ".gitbz.ini.cache"
+
+
 ################################################################################
 
 import base64
-import cPickle as pickle
-from ConfigParser import RawConfigParser, NoOptionError
-import httplib
+import bz
+import bzauth
+import bzexport
+import getpass
+import mercurial # for mercurial.error.Abort
 from optparse import OptionParser
 import os
-import platform
 import re
-import shutil
-try:
-    from sqlite3 import dbapi2 as sqlite
-except ImportError:
-    from pysqlite2 import dbapi2 as sqlite
 from splitreviewer import split_reviewer
 from StringIO import StringIO
 from subprocess import Popen, CalledProcessError, PIPE
 import sys
 import tempfile
-import time
-import urllib
 import urlparse
-import xmlrpclib
-from xml.etree.cElementTree import ElementTree
 
 
 # Globals
@@ -261,12 +256,6 @@ def commit_is_merge(commit):
 # Global configuration variables
 # ==============================
 
-def get_browser():
-    try:
-        return git.config('bz.browser', get=True)
-    except CalledProcessError:
-        return 'firefox3'
-
 def get_tracker():
     if global_options.bugzilla != None:
         return global_options.bugzilla
@@ -306,11 +295,6 @@ def get_add_url_ignore_remote_commits():
     except CalledProcessError:
         return False
 
-def get_firefox_profile_pref():
-    try:
-        return git.config('bz.firefox-profile', get=True)
-    except CalledProcessError:
-        return ""
 
 # Per-tracker configuration variables
 # ===================================
@@ -393,18 +377,6 @@ def tracker_get_path(tracker):
         return config['path']
     return ""
 
-def tracker_get_auth_user(tracker):
-    config = get_config(tracker)
-    if 'auth-user' in config:
-        return config['auth-user']
-    return None
-
-def tracker_get_auth_password(tracker):
-    config = get_config(tracker)
-    if 'auth-password' in config:
-        return config['auth-password']
-    return None
-
 def get_default_fields(tracker):
     config = get_config(tracker)
 
@@ -427,13 +399,11 @@ class BugParseError(Exception):
 # uniquely identifies a bug on a server, though until we try
 # to load it (and create a Bug) we don't know if it actually exists.
 class BugHandle:
-    def __init__(self, host, path, https, id, auth_user=None, auth_password=None):
+    def __init__(self, host, path, https, id):
         self.host = host
         self.path = path
         self.https = https
         self.id = id
-        self.auth_user = auth_user
-        self.auth_password = auth_password
 
         # ensure that the path to the bugzilla installation is an absolute path
         # so that it will still work even if their config option specifies
@@ -450,9 +420,6 @@ class BugHandle:
                                                  self.path if self.path else "",
                                                  self.id)
 
-    def needs_auth(self):
-        return self.auth_user and self.auth_password
-
     @staticmethod
     def parse(bug_reference):
         parseresult = urlparse.urlsplit (bug_reference)
@@ -462,15 +429,10 @@ class BugHandle:
             if len(parseresult.path) == 0 or parseresult.path[0] != '/' or parseresult.hostname is None:
                 raise BugParseError("Invalid bug reference '%s'" % bug_reference)
 
-            user = parseresult.username
-            password = parseresult.password
-            # if the url did not specify http auth credentials in the form
-            # https://user:password@host.com, check to see whether the config file
-            # specifies any auth credentials for this host
-            if not user:
-                user = tracker_get_auth_user(parseresult.hostname)
-            if not password:
-                password = tracker_get_auth_password(parseresult.hostname)
+            if parseresult.username:
+                print 'Ignoring user name in URL.'
+            if parseresult.password:
+                print 'Ignoring password in URL.'
 
             # strip off everything after the last '/', so '/bugzilla/show_bug.cgi'
             # will simply become '/bugzilla'
@@ -481,9 +443,7 @@ class BugHandle:
                 return BugHandle(host=parseresult.hostname,
                                  path=base_path,
                                  https=parseresult.scheme=="https",
-                                 id=m.group(1),
-                                 auth_user=user,
-                                 auth_password=password)
+                                 id=m.group(1))
 
         colon = bug_reference.find(":")
         if colon > 0:
@@ -499,13 +459,15 @@ class BugHandle:
         host = resolve_host_alias(tracker)
         https = tracker_uses_https(tracker)
         path = tracker_get_path(tracker)
-        auth_user = tracker_get_auth_user(tracker)
-        auth_password = tracker_get_auth_password(tracker)
 
         if not re.match(r"^.*\.[a-zA-Z]{2,}$", host):
             raise BugParseError("'%s' doesn't look like a valid bugzilla host or alias" % host)
 
-        return BugHandle(host=host, path=path, https=https, id=id, auth_user=auth_user, auth_password=auth_password)
+        return BugHandle(host=host, path=path, https=https, id=id)
+
+    def get_bug_server(self):
+        return get_bug_server(self.host, self.path, self.https)
+
 
     @staticmethod
     def parse_or_die(str):
@@ -521,294 +483,6 @@ class BugHandle:
         return ((self.host, self.https, self.id) ==
                 (other.host, other.https, other.id))
 
-class CookieError(Exception):
-    pass
-
-def do_get_cookies_from_sqlite(host, cookies_sqlite, browser, query, chromium_time):
-    result = {}
-    # We use a timeout of 0 since we expect to hit the browser holding
-    # the lock often and we need to fall back to making a copy without a delay
-    connection = sqlite.connect(cookies_sqlite, timeout=0)
-
-    try:
-        cursor = connection.cursor()
-        cursor.execute(query, { 'host': host })
-
-        now = time.time()
-        for name,value,path,expiry in cursor.fetchall():
-            # Excessive caution: toss out values that need to be quoted in a cookie header
-            expiry = float(expiry)
-            if chromium_time:
-                # Time stored in microseconds since epoch
-                expiry /= 1000000.
-                # Old chromium versions used to use the Unix epoch, but newer versions
-                # use the Windows epoch of January 1, 1601. Convert the latter to Unix epoch
-                if expiry > 11644473600:
-                    expiry -= 11644473600
-            if float(expiry) > now and not re.search(r'[()<>@,;:\\"/\[\]?={} \t]', value):
-                result[name] = value
-
-        return result
-    # Let the user know what might be going wrong in the case of a cryptic database error.
-    except sqlite.DatabaseError, e:
-        if "file is encrypted or is not a database" in str(e) and get_sqlite3():
-            # Try using the sqlite3 command line tool on OS X (since the MacPorts pysqlite is too old)
-            return get_cookies_from_sqlite_with_sqlite3(host, cookies_sqlite, browser, query,
-                                                        chromium_time=chromium_time)
-        else:
-            print ("Python threw a database error. A likely cause is that your version of python "
-                   "doesn't have a recent enough sqlite module to support this cookie database. "
-                   "Try upgrading your python sqlite module.")
-            raise
-    finally:
-        connection.close()
-
-# Firefox 3.5 keeps the cookies database permamently locked; as a workaround
-# hack, we make a copy, read from that, then delete the copy. Of course,
-# we may hit an inconsistent state of the database
-def get_cookies_from_sqlite_with_copy(host, cookies_sqlite, browser, *args, **kwargs):
-    db_copy = cookies_sqlite + ".git-bz-temp"
-    shutil.copyfile(cookies_sqlite, db_copy)
-    try:
-        return do_get_cookies_from_sqlite(host, db_copy, browser, *args, **kwargs)
-    except sqlite.OperationalError, e:
-        raise CookieError("Cookie database was locked; temporary copy didn't work")
-    finally:
-        os.remove(db_copy)
-
-def get_sqlite3():
-    for dirname in os.environ['PATH'].split(":"):
-        path = os.path.join(dirname, 'sqlite3')
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-          return path
-    return False
-
-def get_cookies_from_sqlite_with_sqlite3(host, cookies_sqlite, browser, query, chromium_time):
-    sqlite3 = get_sqlite3()
-    query = query.replace(':host', '"' + host + '"') + ';'
-    process = Popen([sqlite3, cookies_sqlite], stdout=PIPE, stderr=PIPE, stdin=PIPE)
-    output, error = process.communicate(query)
-    if process.returncode != 0:
-        raise CalledProcessError(process.returncode, sqlite3)
-    cookies = {}
-    for line in output.split("\n"):
-        fields = line.split("|")
-        if (fields[0] == 'Bugzilla_login'):
-            cookies['Bugzilla_login'] = fields[1]
-        elif (fields[0] == 'Bugzilla_logincookie'):
-            cookies['Bugzilla_logincookie'] = fields[1]
-    return cookies
-
-def get_cookies_from_sqlite(host, cookies_sqlite, browser, query, chromium_time=False):
-    try:
-        result = do_get_cookies_from_sqlite(host, cookies_sqlite, browser, query,
-                                            chromium_time=chromium_time)
-    except sqlite.OperationalError, e:
-        if "database is locked" in str(e):
-            # Try making a temporary copy
-            result = get_cookies_from_sqlite_with_copy(host, cookies_sqlite, browser, query,
-                                                       chromium_time=chromium_time)
-        else:
-            raise
-
-    if not ('Bugzilla_login' in result and 'Bugzilla_logincookie' in result):
-        raise CookieError("You don't appear to be signed into %s; please log in with %s" % (host,
-                                                                                            browser))
-
-    return result
-
-def get_cookies_from_sqlite_xulrunner(host, cookies_sqlite, name):
-    return get_cookies_from_sqlite(host, cookies_sqlite, name,
-                                   "select name,value,path,expiry from moz_cookies where host = :host")
-
-def get_bugzilla_cookies_ff3(host):
-    if (platform.system() == "Darwin"):
-        profiles_dir = os.path.expanduser('~/Library/Application Support/Firefox')
-    else:
-        profiles_dir = os.path.expanduser('~/.mozilla/firefox')
-
-    profile_path = None
-    specific_profile = get_firefox_profile_pref()
-
-    cp = RawConfigParser()
-    cp.read(os.path.join(profiles_dir, "profiles.ini"))
-    for section in cp.sections():
-        if not cp.has_option(section, "Path"):
-            continue
-
-        # If we're looking for a specific profile, just check for that
-        if specific_profile != "":
-            if cp.has_option(section, "Name") and cp.get(section, "Name").strip() == specific_profile:
-                profile_path = os.path.join(profiles_dir, cp.get(section, "Path").strip())
-
-        # Otherwise use the profile tagged as default
-        elif (not profile_path or
-            (cp.has_option(section, "Default") and cp.get(section, "Default").strip() == "1")):
-            profile_path = os.path.join(profiles_dir, cp.get(section, "Path").strip())
-
-    if not profile_path:
-        raise CookieError("Cannot find default Firefox profile")
-
-    cookies_sqlite = os.path.join(profile_path, "cookies.sqlite")
-    if not os.path.exists(cookies_sqlite):
-        raise CookieError("%s doesn't exist." % cookies_sqlite)
-
-    return get_cookies_from_sqlite_xulrunner(host, cookies_sqlite, "Firefox")
-
-def get_bugzilla_cookies_galeon(host):
-    cookies_sqlite = os.path.expanduser('~/.galeon/mozilla/galeon/cookies.sqlite')
-    if not os.path.exists(cookies_sqlite):
-        raise CookieError("%s doesn't exist." % cookies_sqlite)
-
-    return get_cookies_from_sqlite_xulrunner(host, cookies_sqlite, "Galeon")
-
-def get_bugzilla_cookies_epy(host):
-    # epiphany-webkit migrated the cookie db to a different location, but the
-    # format is the same
-    profile_dir = os.path.expanduser('~/.gnome2/epiphany')
-    cookies_sqlite = os.path.join(profile_dir, "cookies.sqlite")
-    if not os.path.exists(cookies_sqlite):
-        # try the old location
-        cookies_sqlite = os.path.join(profile_dir, "mozilla/epiphany/cookies.sqlite")
-
-    if not os.path.exists(cookies_sqlite):
-        raise CookieError("%s doesn't exist" % cookies_sqlite)
-
-    return get_cookies_from_sqlite_xulrunner(host, cookies_sqlite, "Epiphany")
-
-# Shared for Chromium and Google Chrome
-def get_bugzilla_cookies_chr(host, browser, config_dir):
-    config_dir = os.path.expanduser(config_dir)
-    cookies_sqlite = os.path.join(config_dir, "Cookies")
-    if not os.path.exists(cookies_sqlite):
-        raise CookieError("%s doesn't exist" % cookies_sqlite)
-    return get_cookies_from_sqlite(host, cookies_sqlite, browser,
-                                   "select name,value,path,expires_utc from cookies where host_key = :host",
-                                   chromium_time=True)
-
-def get_bugzilla_cookies_chromium(host):
-    return get_bugzilla_cookies_chr(host,
-                                    "Chromium",
-                                    '~/.config/chromium/Default')
-
-def get_bugzilla_cookies_google_chrome(host):
-    return get_bugzilla_cookies_chr(host,
-                                    "Google Chrome",
-                                    '~/.config/google-chrome/Default')
-
-def get_bugzilla_cookies_manual(host):
-    tracker = get_tracker()
-    config = get_config(tracker)
-    for p in 'bugzilla-login', 'bugzilla-logincookie':
-        if p not in config:
-            raise CookieError("config `bz-tracker.%s.%s` not found" % (tracker, p))
-    return {
-        'Bugzilla_login': config['bugzilla-login'],
-        'Bugzilla_logincookie': config['bugzilla-logincookie'],
-    }
-
-browsers = { 'firefox3'     : get_bugzilla_cookies_ff3,
-             'epiphany'     : get_bugzilla_cookies_epy,
-             'galeon'       : get_bugzilla_cookies_galeon,
-             'chromium'     : get_bugzilla_cookies_chromium,
-             'google-chrome': get_bugzilla_cookies_google_chrome,
-             'manual'       : get_bugzilla_cookies_manual }
-
-def browser_list():
-    return ", ".join(sorted(browsers.keys()))
-
-def get_bugzilla_cookies(host):
-    browser = get_browser()
-    if browser in browsers:
-        do_get_cookies = browsers[browser]
-    else:
-        die('Unsupported browser %s (we only support %s)' % (browser, browser_list()))
-
-    try:
-        return do_get_cookies(host)
-    except CookieError, e:
-        die("""Error getting login cookie from browser:
-   %s
-
-Configured browser: %s (change with 'git config --global bz.browser <value>')
-Possible browsers: %s""" %
-            (str(e), browser, browser_list()))
-
-# Based on http://code.activestate.com/recipes/146306/ - Wade Leftwich
-def encode_multipart_formdata(fields, files=None):
-    """
-    fields is a dictionary of { name : value } for regular form fields. if value is a list,
-      one form field is added for each item in the list
-    files is a dictionary of { name : ( filename, content_type, value) } for data to be uploaded as files
-    Return (content_type, body) ready for httplib.HTTPContent instance
-    """
-    BOUNDARY = '----------ThIs_Is_tHe_bouNdaRY_$'
-    CRLF = '\r\n'
-    L = []
-    for key in sorted(fields.keys()):
-        value = fields[key]
-        if isinstance(value, list):
-            for v in value:
-                L.append('--' + BOUNDARY)
-                L.append('Content-Disposition: form-data; name="%s"' % key)
-                L.append('')
-                L.append(v)
-        else:
-            L.append('--' + BOUNDARY)
-            L.append('Content-Disposition: form-data; name="%s"' % key)
-            L.append('')
-            L.append(value)
-    if files:
-        for key in sorted(files.keys()):
-            (filename, content_type, value) = files[key]
-            L.append('--' + BOUNDARY)
-            L.append('Content-Disposition: form-data; name="%s"; filename="%s"' % (key, filename))
-            L.append('Content-Type: %s' % content_type)
-            L.append('')
-            L.append(value)
-    L.append('--' + BOUNDARY + '--')
-    L.append('')
-    body = CRLF.join(L)
-    content_type = 'multipart/form-data; boundary=%s' % BOUNDARY
-    return content_type, body
-
-# Cache of constant-responses per bugzilla server
-# ===============================================
-
-CACHE_EXPIRY_TIME = 3600 * 24 # one day
-
-class Cache(object):
-    def __init__(self):
-        self.cfp = None
-
-    def __ensure(self, host):
-        if self.cfp == None:
-            self.cfp = RawConfigParser()
-            self.cfp.read(os.path.expanduser("~/.git-bz-cache"))
-
-        if self.cfp.has_section(host):
-            if time.time() > self.cfp.getfloat(host, "expires"):
-                self.cfp.remove_section(host)
-
-        if not self.cfp.has_section(host):
-            self.cfp.add_section(host)
-            self.cfp.set(host, "expires", time.time() + CACHE_EXPIRY_TIME)
-
-    def get(self, host, key):
-        self.__ensure(host)
-        try:
-            return pickle.loads(self.cfp.get(host, key))
-        except NoOptionError:
-            raise IndexError()
-
-    def set(self, host, key, value):
-        self.__ensure(host)
-        self.cfp.set(host, key, pickle.dumps(value))
-        f = open(os.path.expanduser("~/.git-bz-cache"), "w")
-        self.cfp.write(f)
-        f.close()
-
-cache = Cache()
 
 # General Utility Functions
 # =========================
@@ -908,8 +582,6 @@ def die(message):
     print >>sys.stderr, message
     sys.exit(1)
 
-def http_auth_header(user, password):
-    return 'Basic ' + base64.encodestring("%s:%s" % (user, password)).strip()
 
 # Classes for bug handling
 # ========================
@@ -918,275 +590,186 @@ class BugPatch(object):
     def __init__(self, attach_id):
         self.attach_id = attach_id
 
-class NoXmlRpcError(Exception):
-    pass
 
-connections = {}
+class ShimMercurialUI:
+    def config(self, key1, key2, default=None):
+        if key1 != 'bugzilla':
+            print 'Expected bugzilla for first argument to config.'
+            exit(-1)
+        try:
+            return git.config('bz.' + key2, get=True)
+        except CalledProcessError:
+            return default
 
-def get_connection(host, https):
-    identifier = (host, https)
-    if not identifier in connections:
-        if https:
-            connection = httplib.HTTPSConnection(host, 443)
-        else:
-            connection = httplib.HTTPConnection(host, 80)
+    def configlist(self, key1, key2, arg3):
+        if key1 != 'bugzilla':
+            print 'Expected bugzilla for first argument to configlist.'
+            exit(-1)
+        if key2 != 'firefoxprofile':
+            print 'Expected firefoxprofile for second argument to configlist.'
+            exit(-1)
+        if len(arg3) != 0:
+            print 'Expected [] for third argument to configlist.'
+        # Don't try to support this.
+        return None
 
-        connections[identifier] = connection
+    def debug(self, msg):
+        print 'Debug:', msg
 
-    return connections[identifier]
+    def getpass(self, message, default=None):
+        return getpass.getpass(message)
 
-def kill_connection(host, https):
-    identifier = (host, https)
-    if identifier in connections:
-        del connections[identifier]
+    def prompt(self, message, default=None):
+        sys.stdout.write(message + ' ')
+        line = sys.stdin.readline().strip()
+        if line == '':
+            return default
+        return line
+
+    def warn(self, msg):
+        print 'Warn:', msg
+
+    def write(self, msg):
+        print msg
+
+    def write_err(self, msg):
+        print 'Error:', msg
 
 
 class BugServer(object):
-    def __init__(self, host, path, https, auth_user=None, auth_password=None):
-        self.host = host
-        self.path = path
-        self.https = https
-        self.auth_user = auth_user
-        self.auth_password = auth_password
+    def __init__(self, host, path, https):
+        self.bugzilla = "%s://%s%s/" % ("https" if https else "http", host, path)
+        self.api_server = '%s/bzapi/' % self.bugzilla.rstrip('/')
+        self.ui = ShimMercurialUI()
 
-        self.cookies = get_bugzilla_cookies(host)
+        # Ideally, have a config option to stop the message spam for people
+        # who prefer to enter things manually.
+        if not self.ui.config('bugzilla', 'username'):
+            print 'Your bugzilla username is not specified in your git config.'
+            print 'Set it by running:'
+            print '  git config --global bz.username <your username>'
+            print
+        if not self.ui.config('bugzilla', 'apikey'):
+            print 'No bugzilla API key is specified in your git config. This is the'
+            print 'preferred means of authentication, and other methods may break at'
+            print 'any time. An API key can be obtained here:'
+            print '  https://bugzilla.mozilla.org/userprefs.cgi?tab=apikey'
+            print 'Once obtained, set the API key by running:'
+            print '  git config --global bz.apikey <your bugzilla API key>'
+            print
 
-        self._xmlrpc_proxy = None
-
-    def get_cookie_string(self):
-        return ("Bugzilla_login=%s; Bugzilla_logincookie=%s" %
-                (self.cookies['Bugzilla_login'], self.cookies['Bugzilla_logincookie']))
-
-    def send_request(self, method, url, data=None, headers={}):
-        headers = dict(headers)
-        cookies = self.get_cookie_string()
-        if isinstance(cookies, unicode):
-            cookies = cookies.encode('UTF-8')
-        headers['Cookie'] = cookies
-        headers['User-Agent'] = "git-bz"
-        if self.auth_user and self.auth_password:
-            headers['Authorization'] = http_auth_header(self.auth_user, self.auth_password)
-        if self.path:
-            url = self.path + url
-
-        seen_urls = []
-        retries = 0
-        connection = get_connection(self.host, self.https)
-        while True:
-
-            # BMO seems to generate some "bad status line" exception intermittently.
-            try:
-              connection.request(method, url, data, headers)
-              response = connection.getresponse()
-            except httplib.BadStatusLine:
-              retries = retries + 1
-              print "Got bad status line - retrying..."
-              connection.close()
-              kill_connection(self.host, self.https)
-              time.sleep(2)
-              connection = get_connection(self.host, self.https)
-              continue
-            retries = 0
-
-            seen_urls.append(url)
-
-            # Redirect status codes:
-            #
-            # 301 (Moved Permanently): Redo with the new URL,
-            #   save the new location.
-            # 303 (See Other): Redo with the method changed to GET/HEAD.
-            # 307 (Temporary Redirect): Redo with the new URL, don't
-            #   save the new location.
-            #
-            # [ For 301/307, you are supposed to ask the user if the
-            #   method isn't GET/HEAD, but we're automating anyways... ]
-            #
-            # 302 (Found): The confusing one, and the one that
-            # Bugzilla uses, both to redirect to http to https and to
-            # redirect attachment.cgi&action=view to a different base URL
-            # for security. Specified like 307, traditionally treated as 301.
-            #
-            # See http://en.wikipedia.org/wiki/HTTP_302
-
-            if response.status in (301, 302, 303, 307):
-                new_url = response.getheader("location")
-                if new_url is None:
-                    die("Redirect received without a location to redirect to")
-                if new_url in seen_urls or len(seen_urls) >= 10:
-                    die("Circular redirect or too many redirects")
-
-                old_split = urlparse.urlsplit(url)
-                new_split = urlparse.urlsplit(new_url)
-
-                new_https = new_split.scheme == 'https'
-
-                if new_split.hostname != self.host or new_https != self.https:
-                    connection = get_connection(new_split.hostname, new_https != self.https)
-
-                    # This is a bit of a hack to avoid keeping on redirecting for every
-                    # request. If the server redirected show_bug.cgi we assume it's
-                    # really saying "hey, the bugzilla instance is really over here".
-                    #
-                    # We can't do this for old.split.path == new_split.path because of
-                    # attachment.cgi, though we alternatively could just exclude
-                    # attachment.cgi here.
-                    if (response.status in (301, 302) and
-                        method == 'GET' and
-                        old_split.path == '/show_bug.cgi' and new_split.path == '/show_bug.cgi'):
-
-                        self.host = new_split.hostname
-                        self.https = new_https
-
-                # We can't treat 302 like 303 because of the use of 302 for http
-                # to https, though the hack above will hopefully get us on https
-                # before we try to POST.
-                if response.status == 303:
-                    if method not in ('GET', 'HEAD'):
-                        method = 'GET'
-
-                # Get the relative component of the new URL
-                url = urlparse.urlunsplit((None, None, new_split.path, new_split.query, new_split.fragment))
-            else:
-                return response
-
-    def send_post(self, url, fields, files=None):
-        content_type, body = encode_multipart_formdata(fields, files)
-        return self.send_request("POST", url, data=body, headers={ 'Content-Type': content_type })
-
-    def get_xmlrpc_proxy(self):
-        if self._xmlrpc_proxy is None:
-            uri = "%s://%s%s/xmlrpc.cgi" % ("https" if self.https else "http",
-                                          self.host, self.path)
-            if self.https:
-                transport = SafeBugTransport(self)
-            else:
-                transport = BugTransport(self)
-            self._xmlrpc_proxy = xmlrpclib.ServerProxy(uri, transport)
-
-        return self._xmlrpc_proxy
-
-    def _product_id(self, product_name):
-        # This way works with newer bugzilla; older Bugzilla doesn't support names:
         try:
-            response = self.get_xmlrpc_proxy().Product.get({ 'names': product_name, 'include_fields': ['id', 'name'] })
-            products = response['products']
-            if len(products) > 0:
-                return products[0]['id']
-        except xmlrpclib.Fault, e:
-            pass
-        except xmlrpclib.ProtocolError, e:
-            pass
+            self.auth = bzauth.get_auth(self.ui, self.bugzilla, None)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
-        # This should work with any bugzilla that supports xmlrpc, but will be slow
-        print >>sys.stderr, "Searching for product ID ...",
+    def create_bug(self, bug_fields):
+        response = self.auth.rest_request('POST', 'bug', data=bug_fields)
+        return response['id']
+
+    def flag_type_id(self, bug, flag_name):
+        assert not bug.product is None
+        assert not bug.component is None
+        return bzexport.flag_type_id(self.ui, self.api_server, CONFIG_CACHE_FILENAME,
+                                     flag_name, bug.product, bug.component)
+
+    def get_attachments(self, bugid, attachment_data=False):
         try:
-            response = self.get_xmlrpc_proxy().Product.get_accessible_products({})
-            ids = response['ids']
-            response = self.get_xmlrpc_proxy().Product.get_products({ 'ids': ids, 'include_fields': ['id', 'name']})
-            for p in response['products']:
-                if p['name'] == product_name:
-                    print >>sys.stderr, "found it"
-                    return p['id']
-        except xmlrpclib.Fault, e:
-            pass
-        except xmlrpclib.ProtocolError, e:
-            pass
+            request = 'bug/%s/attachment' % bugid
+            if not attachment_data:
+                request = request + '?exclude_fields=data'
+            return self.auth.rest_request('GET', request)['bugs'][bugid]
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
-        print >>sys.stderr, "failed"
-        return None
-
-    def product_id(self, product_name):
-        key = 'product_id_' + urllib.quote(product_name)
+    def get_bug(self, bugid):
         try:
-            return cache.get(self.host, key)
-        except IndexError:
-            value = self._product_id(product_name)
-            if value != None:
-                cache.set(self.host, key, value)
-            return value
+            return bz.get_bug(self.auth, bugid)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
-    # Query the server for the legal values of the given field; returns an
-    # array, or None if the query failed
-    def _legal_values(self, field):
+    def get_product_components(self, product):
         try:
-            response = self.get_xmlrpc_proxy().Bug.legal_values({ 'field': field })
-            cache.set(self.host, 'legal_' + field, response['values'])
-            return response['values']
-        except xmlrpclib.Fault, e:
-            if e.faultCode == -32000: # https://bugzilla.mozilla.org/show_bug.cgi?id=513511
-                return None
-            raise
-        except xmlrpclib.ProtocolError, e:
-            if e.errcode == 500: # older bugzilla versions die this way
-                return None
-            elif e.errcode == 404: # really old bugzilla, no XML-RPC
-                return None
-            raise
+            request_string = 'product/{0}?include_fields=components.name'.format(product)
+            product_info = self.auth.rest_request('GET', request_string)['products']
+            assert len(product_info) == 1
+            component_info = product_info[0]['components']
+            component_list = [x['name'] for x in component_info]
+            component_list.sort()
+            return component_list
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
-    def legal_values(self, field):
+    def legal_field_values(self, field_name):
+        # XXX Should cache this.
+        vals = self.auth.rest_request('GET', 'field/bug/' + field_name + '?include_fields=values')
+        vals = vals['fields'][0]['values']
+        return [x['name'] for x in vals]
+
+    # Note that if a comment is given when obsoleting multiple attachments,
+    # the comment will be posted repeatedly. See bug 1206797.
+    def obsolete_attachments_by_id(self, attachment_ids, comment=''):
+        if not attachment_ids:
+            return
         try:
-            return cache.get(self.host, 'legal_' + field)
-        except IndexError:
-            values = self._legal_values(field)
-            cache.set(self.host, 'legal_' + field, values)
-            return values
+            o = {
+                'ids': attachment_ids,
+                'is_obsolete': True,
+            }
+            if comment:
+                o['comment'] = comment
 
-# mixin for xmlrpclib.Transport classes to add cookies
-class CookieTransportMixin(object):
-    def send_request(self, connection, *args):
-        xmlrpclib.Transport.send_request(self, connection, *args)
-        cookie = self.server.get_cookie_string()
-        if isinstance(cookie, unicode):
-            cookie = cookie.encode('UTF-8')
-        connection.putheader("Cookie", cookie)
-        connection.putheader("Authorization", http_auth_header(self.server.auth_user, self.server.auth_password))
+            return self.auth.rest_request('PUT', 'bug/attachment/%s' % attachment_ids[0], data=o)
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
 
-class BugTransport(CookieTransportMixin, xmlrpclib.Transport):
-    def __init__(self, server):
-        xmlrpclib.Transport.__init__(self)
-        self.server = server
+    def update_bug(self, bug_id, changes):
+        bz.update_bug(self.auth, bug_id, changes)
 
-class SafeBugTransport(CookieTransportMixin, xmlrpclib.SafeTransport):
-    def __init__(self, server):
-        xmlrpclib.SafeTransport.__init__(self)
-        self.server = server
+    def validate_users(self, requestee_list, flag_name):
+        valid_users = bzexport.validate_users(self.ui, self.api_server, self.auth,
+                                              requestee_list, bzexport.multi_user_prompt,
+                                              flag_name + 'er')
+        return bzexport.select_users(valid_users, requestee_list)
+
 
 servers = {}
 
-# Note that if we detect that we are redirecting, we may rewrite the
-# host/https of the server to avoid doing too many redirections, and
-# so the host,https we connect to may be different than what we use
-# to look up the server.
-def get_bug_server(host, path, https, auth_user, auth_password):
+def get_bug_server(host, path, https):
     identifier = (host, path, https)
     if not identifier in servers:
-        servers[identifier] = BugServer(host, path, https, auth_user, auth_password)
+        servers[identifier] = BugServer(host, path, https)
 
     return servers[identifier]
 
-# Unfortunately, Bugzilla doesn't set a useful status code for
-# form posts.  Because it's very confusing to claim we succeeded
-# but not, we look for text in the response indicating success,
-# and not text indicating failure.
-#
-# We generally look for specific <title> tags - these have been
-# quite stable across versions, though translations will throw
-# us off.
-#
-# *args are regular expressions to search for in response_data
-# that indicate success. Returns the matched regular expression
-# on success, None otherwise
-def check_for_success(response, response_data, *args):
+def tracker_get_bug_server(tracker):
+    host = resolve_host_alias(tracker)
+    path = tracker_get_path(tracker)
+    https = tracker_uses_https(tracker)
+    return get_bug_server(host, path, https)
 
-    if response.status != 200:
-        return False
 
-    for pattern in args:
-        m = re.search(pattern, response_data)
-        if m:
-            return m
+class BugAttachment:
+    def __init__(self, raw_attachment):
+        self.attach_id = raw_attachment['id']
+        self.description = raw_attachment['summary']
+        self.flag_requestees = set(flag.get('requestee') for flag in raw_attachment['flags'])
+        if 'data' in raw_attachment:
+            self.data = base64.b64decode(raw_attachment['data'])
+        else:
+            self.data = None
 
-    return None
+
+class AttachmentFlagValues:
+    def __init__(self):
+        self.status = None
+        self.requestees = []
+
 
 class Bug(object):
     def __init__(self, server):
@@ -1197,301 +780,128 @@ class Bug(object):
         self.short_desc = None
         self.patches = []
 
-    def _load(self, id, attachmentdata=False):
-        url = "/show_bug.cgi?id=" + id + "&ctype=xml&format=default"
-        if not attachmentdata:
-            url += "&excludefield=attachmentdata"
-
-        response = self.server.send_request("GET", url)
-        if response.status != 200:
-            die ("Failed to retrieve bug information: %d" % response.status)
-
-        etree = ElementTree()
-        etree.parse(response)
-
-        bug = etree.find("bug")
-        error = bug.get("error")
-        if error != None:
-            die ("Failed to retrieve bug information: %s" % error)
-
-        self.id = int(bug.find("bug_id").text)
-        self.short_desc = bug.find("short_desc").text
-        self.bug_status = bug.find("bug_status").text
+    def _load(self, bugid, attachment_data=False):
+        buginfo = self.server.get_bug(bugid)
+        self.id = buginfo['id']
+        self.product = buginfo['product']
+        self.component = buginfo['component']
+        self.short_desc = buginfo['summary']
+        self.bug_status = buginfo['status']
         if self.bug_status == "RESOLVED":
-            self.resolution = bug.find("resolution").text
-        token = bug.find("token")
-        self.token = None if token is None else token.text
+            self.resolution = buginfo['resolution']
 
-        for attachment in bug.findall("attachment"):
-            if attachment.get("ispatch") == "1" and not attachment.get("isobsolete") == "1" :
-                attach_id = int(attachment.find("attachid").text)
-                patch = BugPatch(attach_id)
-                # We have to save fields we might not otherwise care about
-                # (like isprivate) so that we can pass them back when updating
-                # the attachment
-                patch.description = attachment.find("desc").text
-                patch.date = attachment.find("date").text
-                status = attachment.find("status")
-                patch.status = None if status is None else status.text
-                patch.filename = attachment.find("filename").text
-                patch.isprivate = attachment.get("isprivate") == "1"
-                token = attachment.find("token")
-                patch.token = None if token is None else token.text
-                patch.flag_requestees = set(flag.get("requestee") for flag in attachment.findall("flag"))
+        attachments = self.server.get_attachments(bugid, attachment_data=attachment_data)
+        for a in attachments:
+            if not a["is_patch"]:
+                continue
+            if a["is_obsolete"]:
+                continue
+            self.patches.append(BugAttachment(a))
 
-                if attachmentdata:
-                    data = attachment.find("data").text
-                    patch.data = base64.b64decode(data)
-                else:
-                    patch.data = None
+    def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
+        o = {
+            'ids': [self.id],
+            'summary': description,
+            'file_name': filename,
+            'data': base64.b64encode(data),
+            'encoding': 'base64',
+            'content_type': 'text/plain',
+            'is_patch': True,
+            'flags': [],
+        }
 
-                self.patches.append(patch)
-
-    def get_attachment_token(self):
-
-        # Bugzilla now requires a separate token from the attachment creation
-        # page to create an attachment. There doesn't appear to be an XML
-        # interface to it, so we scrape away.
-        url = "/attachment.cgi?bugid=" + str(self.id) + "&action=enter"
-        response = self.server.send_request("GET", url)
-        if response.status != 200:
-          return None
-
-        match = re.search(r'name="token" value="([^"]+)',
-                                     response.read())
-        if not match:
-          return None
-        return  match.group(1)
-
-    def _create_via_xmlrpc(self, product, component, short_desc, comment, default_fields):
-        params = dict()
-        params['product'] = product
-        params['component'] = component
-        params['summary'] = short_desc
-        params['description'] = comment
-        for (field, value) in default_fields.iteritems():
-            params[field] = value
-
-        try:
-            response = self.server.get_xmlrpc_proxy().Bug.create(params)
-            self.id = response['id']
-        except xmlrpclib.Fault, e:
-            die(e.faultString)
-        except xmlrpclib.ProtocolError, e:
-            if e.errcode == 404:
-                raise NoXmlRpcError(e.errmsg)
-            else:
-                print >>sys.stderr, "Problem filing bug via XML-RPC: %s (%d)\n" % (e.errmsg, e.errcode)
-                print >>sys.stderr, "falling back to form post\n"
-                raise NoXmlRpcError("Communication error")
-
-    def _create_with_form(self, product, component, short_desc, comment, default_fields):
-        fields = dict()
-        fields['product'] = product
-        fields['component'] = component
-        fields['short_desc'] = short_desc
-        fields['comment'] = comment
-
-        # post_bug.cgi wants some names that are less congenial than the names
-        # expected in XML-RPC.
-        for (field, value) in default_fields.iteritems():
-            if field == 'severity':
-                field = 'bug_severity'
-            elif field == 'platform':
-                field = 'rep_platform'
-            fields[field] = value
-
-        # Priority values vary wildly between different servers because the stock
-        # Bugzilla uses the awkward P1/../P5. It will be defaulted on the XML-RPC
-        # code path, but we need to take a wild guess here.
-        if not 'priority' in fields:
-            fields['priority'] = 'P5'
-        # Legal severity values are much more standardized, but not specifying it
-        # in the XML-RPC code path allows the server default to win. We need to
-        # specify something here.
-        if not 'severity' in fields:
-            fields['bug_severity'] = 'normal'
-        # Required, but a configured default doesn't make any sense
-        if not 'bug_file_loc' in fields:
-            fields['bug_file_loc'] = ''
-
-        response = self.server.send_post("/post_bug.cgi", fields)
-        response_data = response.read()
-        m = check_for_success(response, response_data,
-                              r"<title>\s*Bug\s+([0-9]+)")
-        if not m:
-            print response_data
-            die("Failed to create bug, status=%d" % response.status)
-
-        self.id = int(m.group(1))
-
-    def _create(self, product, component, short_desc, comment, default_fields):
-        try:
-            self._create_via_xmlrpc(product, component, short_desc, comment, default_fields)
-        except NoXmlRpcError:
-            self._create_with_form(product, component, short_desc, comment, default_fields)
-
-        print "Successfully created"
-        print "Bug %d - %s" % (self.id, short_desc)
-        print self.get_url()
-
-    def create_patch(self, description, comment, filename, data, obsoletes=[], status='none', review=[], superreview=[], feedback=[], ui_review=[]):
-        fields = {}
-        fields['bugid'] = str(self.id)
-        token = self.get_attachment_token()
-        if token:
-          fields['token'] = token
-        fields['action'] = 'insert'
-        fields['ispatch'] = '1'
-        fields['attachments.status'] = status
-        fields['description'] = description
         if comment:
-            fields['comment'] = comment
-        if obsoletes:
-            # this will produce multiple parts in the encoded data with the
-            # name 'obsolete' for each item in the list
-            fields['obsolete'] = map(str, obsoletes)
+            o['comment'] = comment
 
-        # Support for flagging for review/superreview/feedback/ui-review. I have
-        # no idea if this works on installations other than
-        # bugzilla.mozilla.org. These flag numbers are specified at
-        # https://api-dev.bugzilla.mozilla.org/latest/configuration.
-        # Note that the Firefox component for some reason uses a review flag with
-        # ID 748.  We submit both at the same time, and the server picks the one
-        # that applies to the component.
-        review_flag = 4
-        firefox_review_flag = 748
-        superreview_flag = 5
-        feedback_flag = 607
-        ui_review_flag = 203
-        if review:
-            if review[0] == ':me+':
-                fields['flag_type-%d' % review_flag] = '+'
-                fields['flag_type-%d' % firefox_review_flag] = '+'
-            else:
-                fields['flag_type-%d' % review_flag] = '?'
-                fields['flag_type-%d' % firefox_review_flag] = '?'
-                fields['requestee_type-%d' % review_flag] = ",".join(review)
-                fields['requestee_type-%d' % firefox_review_flag] = ",".join(review)
-        if superreview:
-            if superreview[0] == ':me+':
-                fields['flag_type-%d' % superreview_flag] = '+'
-            else:
-                fields['flag_type-%d' % superreview_flag] = '?'
-                fields['requestee_type-%d' % superreview_flag] = ",".join(superreview)
-        if feedback:
-            if feedback[0] == ':me+':
-                fields['flag_type-%d' % feedback_flag] = '+'
-            else:
-                fields['flag_type-%d' % feedback_flag] = '?'
-                fields['requestee_type-%d' % feedback_flag] = ",".join(feedback)
-        if ui_review:
-            if ui_review[0] == ':me+':
-                fields['flag_type-%d' % ui_review_flag] = '+'
-            else:
-                fields['flag_type-%d' % ui_review_flag] = '?'
-                fields['requestee_type-%d' % ui_review_flag] = ",".join(ui_review)
+        for flag_name, flag_values in patch_flags.iteritems():
+            requestee_list = self.server.validate_users(flag_values.requestees, flag_name)
+            if requestee_list is None:
+                die('Invalid reviewer(s).')
 
-        files = { 'data': (filename, 'text/plain; charset=UTF-8', data) }
+            flag_id = self.server.flag_type_id(self, flag_name)
 
-        response = self.server.send_post("/attachment.cgi", fields, files)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 # Older bugzilla's used this for successful attachments
-                                 r"<title>\s*Changes\s+Submitted",
-                                 # Newer bugzilla's, use, instead:
-                                 r"<title>\s*Attachment\s+\d+\s+added"):
-            response_match = re.search("<title>([^<]+)</title>", response_data)
-            if response_match:
-                print 'Error response from bugzilla:', response_match.group(1)
-            else:
-                print 'Error response from bugzilla.'
-            die ("Failed to attach patch to bug %d, status=%d" % (self.id, response.status))
+            if not flag_values.status is None:
+                o['flags'].append({
+                    'name': flag_name,
+                    'type_id': flag_id,
+                    'status': flag_values.status,
+                })
+
+            for requestee in requestee_list:
+                o['flags'].append({
+                    'name': flag_name,
+                    'type_id': flag_id,
+                    'status': '?',
+                    'requestee': requestee,
+                })
+
+        self.server.auth.rest_request('POST', 'bug/%s/attachment' % self.id, data=o)
+
+        # It would be better if we could do this in the same request.
+        self.server.obsolete_attachments_by_id(obsoletes)
 
         print "Attached %s" % filename
 
-    # Update specified fields of a bug; keyword arguments are interpreted
-    # as field_name=value
-    def update(self, **changes):
-        changes['id'] = str(self.id)
-        if self.token:
-            changes['token'] = self.token
-        # Since we don't send delta_ts we'll never get a mid-air collision
-        # This is probably a good thing
-
-        response = self.server.send_post("/process_bug.cgi", changes)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 r"<title>\s*Bug[\S\s]*processed\s*</title>"):
-
-            # Mid-air collisions would be indicated by
-            # "<title>Mid-air collision!</title>"
-
-            print response_data
-            die ("Failed to update bug %d, status=%d" % (self.id, response.status))
-
-    # Update specified fields of an attachment; keyword arguments are
-    # interpreted as field_name=value
-    def update_patch(self, patch, **changes):
-        # Unlike /process_bug.cgi, the attachment editing interface doesn't
-        # support defaulting missing fields to their existing values, so we
-        # have to pass everything back.
-        fields = {
-            'action': 'update',
-            'id': str(patch.attach_id),
-            'description': patch.description,
-            'filename': patch.filename,
-            'ispatch': "1",
-            'isobsolete': "0",
-            'isprivate': "1" if patch.isprivate else "0",
-        };
-
-        if patch.token:
-            fields['token'] = patch.token
-        if patch.status is not None:
-            fields['attachments.status'] = patch.status
-
-        for (field, value) in changes.iteritems():
-            if field == 'status': # encapsulate oddball form field name
-                field = 'attachments.status'
-            fields[field] = value
-
-        response = self.server.send_post("/attachment.cgi", fields)
-        response_data = response.read()
-        if not check_for_success(response, response_data,
-                                 r"<title>\s*Changes\s+Submitted"):
-            print response_data
-            die ("Failed to update attachment %d to bug %d, status=%d" % (patch.attach_id,
-                                                                          self.id,
-                                                                          response.status))
-
     def get_url(self):
-        return "%s://%s/show_bug.cgi?id=%d" % ("https" if self.server.https else "http",
-                                               self.server.host,
-                                               self.id)
+        return "%sshow_bug.cgi?id=%d" % (self.server.bugzilla, self.id)
+
+    def update(self, changes):
+        self.server.update_bug(self.id, changes)
 
     @staticmethod
-    def load(bug_reference, attachmentdata=False):
-        server = get_bug_server(bug_reference.host, bug_reference.path, bug_reference.https, bug_reference.auth_user, bug_reference.auth_password)
+    def load(bug_reference, attachment_data=False):
+        server = bug_reference.get_bug_server()
         bug = Bug(server)
-        bug._load(bug_reference.id, attachmentdata)
+        bug._load(bug_reference.id, attachment_data)
 
         return bug
 
     @staticmethod
-    def create(tracker, product, component, short_desc, comment):
-        host = resolve_host_alias(tracker)
-        https = tracker_uses_https(tracker)
-        path = tracker_get_path(tracker)
-        auth_user = tracker_get_auth_user(tracker)
-        auth_password = tracker_get_auth_password(tracker)
+    def create(tracker, product, component, summary, description):
+        server = tracker_get_bug_server(tracker)
         default_fields = get_default_fields(tracker)
 
-        server = get_bug_server(host, path, https, auth_user, auth_password)
+        # Create the bug in Bugzilla.
+        bug_fields = {}
+        for k, v in default_fields.iteritems():
+            bug_fields[k] = v
+
+        bug_fields['product'] = product
+        bug_fields['component'] = component
+        bug_fields['summary'] = summary
+        bug_fields['description'] = description
+
+        bug_id = server.create_bug(bug_fields)
+
+        print "Successfully created"
+
+        # Create a Bug object for the bug we just created in Bugzilla.
+        # We fill this in using the information we used to create the
+        # bug rather than query the server because it is faster.
         bug = Bug(server)
-        bug._create(product, component, short_desc, comment, default_fields)
+        bug.id = bug_id
+        bug.product = product
+        bug.component = component
+        bug.short_desc = summary.rstrip()
+
+        # bug.bug_status and bug.resolution are not set. We can't tell
+        # if bug_status is UNCONFIRMED or NEW. Hopefully neither will
+        # be needed.
+
+        if False:
+            # Debugging check that we are setting values that match the server.
+            bug2 = Bug(server)
+            bug2._load(str(bug_id))
+            assert bug.id == bug2.id
+            assert bug.product == bug2.product
+            assert bug.component == bug2.component
+            assert bug.short_desc == bug2.short_desc
+
+        print "Bug %d - %s" % (bug.id, summary)
+        print bug.get_url()
 
         return bug
+
 
 # The Commands
 # =============
@@ -1702,16 +1112,12 @@ def requestee_match(requestees):
 
 def do_apply(bug_reference):
     bug = Bug.load(BugHandle.parse_or_die(bug_reference),
-                   attachmentdata=True)
+                   attachment_data=True)
 
     print "Bug %d - %s" % (bug.id, bug.short_desc)
     print
 
     for patch in bug.patches:
-        if patch.status == 'committed' or patch.status == 'rejected':
-            print "Skipping, %s: %s" % (patch.status, patch.description)
-            continue
-
         if not requestee_match(patch.flag_requestees):
             print "Skipping patch for %s: %s" % (patch.flag_requestees,
                                                  patch.description)
@@ -1813,10 +1219,17 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
     lines = edit_template(template.getvalue())
 
     obsoletes = []
-    review = []
-    superreview = []
-    feedback = []
-    ui_review = []
+    patch_flags = {}
+
+    def add_patch_flag(flag_name):
+        def set_for_flag(requestee):
+            fv = patch_flags.setdefault(flag_name, AttachmentFlagValues())
+            if requestee == ':me+':
+                assert fv.status is None or fv.status == '+'
+                fv.status = '+'
+            else:
+                fv.requestees.append(requestee)
+        return set_for_flag
 
     commit_message = []
     comment_lines = []
@@ -1824,19 +1237,18 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
     for line in lines:
         # Capture a |Metadata:| formatted line and stuff it into the relevant
         # list
-        def append_matching_group(key, list, line, content_regexp='.+'):
+        def append_matching_group(key, retfn, line, content_regexp='.+'):
             match = re.match("^\s*%s\s*:\s*(%s)" % (key, content_regexp), line)
             if match:
-                list.append(match.group(1).strip())
+                retfn(match.group(1).strip())
                 return True
             return False
-
-        if append_matching_group("Obsoletes", obsoletes, line, content_regexp="[\d]+") or \
-           append_matching_group("Review", review, line) or \
-           append_matching_group("Super-Review", superreview, line) or \
-           append_matching_group("Feedback", feedback, line) or \
-           append_matching_group("ui-review", ui_review, line) or \
-           append_matching_group("Commit-Message", commit_message, line):
+        if append_matching_group("Obsoletes", obsoletes.append, line, content_regexp="[\d]+") or \
+           append_matching_group("Review", add_patch_flag("review"), line) or \
+           append_matching_group("Super-Review", add_patch_flag("superreview"), line) or \
+           append_matching_group("Feedback", add_patch_flag("feedback"), line) or \
+           append_matching_group("ui-review", add_patch_flag("ui-review"), line) or \
+           append_matching_group("Commit-Message", commit_message.append, line):
             continue
 
         # The Commit-Message: line delineates the break between the attachment
@@ -1868,10 +1280,9 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
         commit_message = description
         commit_body = comment
 
-    return description, comment, commit_message, commit_body, obsoletes, \
-           review, superreview, feedback, ui_review
+    return description, comment, commit_message, commit_body, obsoletes, patch_flags
 
-def attach_commits(bug, commits, fill_comment=True, edit=False, status='none'):
+def attach_commits(bug, commits, fill_comment=True, edit=False):
     # We want to attach the patches in chronological order
     commits = list(commits)
     commits.reverse()
@@ -1895,17 +1306,13 @@ def attach_commits(bug, commits, fill_comment=True, edit=False, status='none'):
         else:
             comment = None
         if edit:
-            description, comment, commit_message, commit_body, obsoletes, \
-                review, superreview, feedback, ui_review = \
-                    edit_attachment_comment(bug, commit_range.subject, commit_body, comment)
+            description, comment, commit_message, commit_body, obsoletes, patch_flags = \
+                edit_attachment_comment(bug, commit_range.subject, commit_body, comment)
         else:
             description = strip_bug_prefix(bug, commit_range.subject)
             commit_message = commit_range.subject
             obsoletes = []
-            review = []
-            superreview = []
-            feedback = []
-            ui_review = []
+            patch_flags = {}
         # Prepend the body
         if commit_body:
             patch = commit_body + "\n\n" + patch
@@ -1917,7 +1324,7 @@ def attach_commits(bug, commits, fill_comment=True, edit=False, status='none'):
         hgstring += "# User " + commit_range.author + '\n\n'
         patch = hgstring + patch + '\n'
 
-        bug.create_patch(description, comment, filename, patch, obsoletes=obsoletes, status=status, review=review, superreview=superreview, feedback=feedback, ui_review=ui_review)
+        bug.create_patch(description, comment, filename, patch, obsoletes=obsoletes, patch_flags=patch_flags)
 
 def _get_commits_and_handle(args):
     if len(args) == 1:
@@ -1990,41 +1397,8 @@ def do_attach(*args):
 
     attach_commits(bug, commits, edit=global_options.edit)
 
-# Sort the patches in the bug into categories based on a set of Git
-# git commits that we're considering to be newly applied. Matching
-# is done on exact git subject <=> patch description matches.
-def filter_patches(bug, applied_commits):
-    newly_applied_patches = dict() # maps to the commit object where it was applied
-    obsoleted_patches = set()
-    unapplied_patches = set()
-
-    applied_subjects = dict(((commit.subject, commit) for commit in applied_commits))
-    seen_subjects = set()
-
-    # Work backwards so that the latest patch is considered applied, and older
-    # patches with the same subject obsoleted.
-    for patch in reversed(bug.patches):
-        # Previously committted or rejected patches are never a match
-        if patch.status == "committed" or patch.status == "rejected":
-            continue
-
-        if patch.description in seen_subjects:
-            obsoleted_patches.add(patch)
-        elif patch.description in applied_subjects:
-            newly_applied_patches[patch] = applied_subjects[patch.description]
-            seen_subjects.add(patch)
-        else:
-            unapplied_patches.add(patch)
-
-    return newly_applied_patches, obsoleted_patches, unapplied_patches
-
-def edit_bug(bug, applied_commits=None, fix_commits=None):
-    if applied_commits is not None:
-        newly_applied_patches, obsoleted_patches, unapplied_patches = filter_patches(bug, applied_commits)
-        mark_resolved = len(unapplied_patches) == 0 and bug.bug_status != "RESOLVED"
-    else:
-        newly_applied_patches = obsoleted_patches = set()
-        mark_resolved = fix_commits is not None
+def edit_bug(bug):
+    newly_applied_patches = obsoleted_patches = set()
 
     template = StringIO()
     template.write("# Bug %d - %s - %s" % (bug.id, bug.short_desc, bug.bug_status))
@@ -2034,59 +1408,26 @@ def edit_bug(bug, applied_commits=None, fix_commits=None):
     template.write("# %s\n" % bug.get_url())
     template.write("# Enter comment on following lines; delete everything to abort\n\n")
 
-    if fix_commits is not None:
-        if len(fix_commits) == 1:
-            template.write("The following fix has been pushed:\n")
-        else:
-            template.write("The following fixes have been pushed:\n")
-        for commit in reversed(fix_commits):
-            template.write(commit.id[0:7] + " " + commit.subject + "\n")
-        template.write("\n")
-
     for patch in bug.patches:
         if patch in newly_applied_patches:
             commit = newly_applied_patches[patch]
             template.write("Attachment %d pushed as %s - %s\n" % (patch.attach_id, commit.id[0:7], commit.subject))
 
-    if mark_resolved:
-        template.write("# Comment to keep bug open\n")
-    elif bug.bug_status == "RESOLVED":
+    if bug.bug_status == "RESOLVED":
         template.write("# Uncommment and edit to change resolution\n")
     else:
         template.write("# Uncomment to resolve bug\n")
-    legal_resolutions = bug.server.legal_values('resolution')
+    legal_resolutions = bug.server.legal_field_values('resolution')
     if legal_resolutions:
         # Require non-empty resolution. DUPLICATE, MOVED would need special support
         legal_resolutions = [x for x in legal_resolutions if x not in ('', 'DUPLICATE', 'MOVED')]
         template.write("# possible resolutions: %s\n" % abbreviation_help_string(legal_resolutions))
-    if not mark_resolved:
-        template.write("#")
-    template.write("Resolution: FIXED\n")
+    template.write("# Resolution: FIXED\n")
 
     if len(bug.patches) > 0:
-        patches_have_status = any((patch.status is not None for patch in bug.patches))
-        if patches_have_status:
-            if len(newly_applied_patches) > 0 or len(obsoleted_patches) > 0:
-                template.write("\n# Lines below change patch status, unless commented out\n")
-            else:
-                template.write("\n# To change patch status, uncomment below, edit 'committed' as appropriate.\n")
-            legal_statuses = bug.server.legal_values('attachments.status')
-            if legal_statuses:
-                legal_statuses.append('obsolete')
-                template.write("# possible statuses: %s\n" % abbreviation_help_string(legal_statuses))
-
-            for patch in bug.patches:
-                if patch in newly_applied_patches:
-                    new_status = "committed"
-                elif patch in obsoleted_patches:
-                    new_status = "obsolete"
-                else:
-                    new_status = "#committed"
-                template.write("%s @%d - %s - %s\n" % (new_status, patch.attach_id, patch.description, patch.status))
-        else:
-            template.write("\n# To mark patches obsolete, uncomment below\n")
-            for patch in bug.patches:
-                template.write("#obsolete @%d - %s\n" % (patch.attach_id, patch.description))
+        template.write("\n# To mark patches obsolete, uncomment below\n")
+        for patch in bug.patches:
+            template.write("#obsolete @%d - %s\n" % (patch.attach_id, patch.description))
 
         template.write("\n")
 
@@ -2100,11 +1441,12 @@ def edit_bug(bug, applied_commits=None, fix_commits=None):
         m = re.match("^\s*(\S+)\s*@\s*(\d+)", line)
         if m:
             status = m.group(1)
-            changed_attachments[int(m.group(2))] = status
-            return False
+            if status == 'obsolete':
+                obsoleted_attachments.append(int(m.group(2)))
+                return False
         return True
 
-    changed_attachments = {}
+    obsoleted_attachments = []
     resolutions = []
 
     lines = filter(filter_line, lines)
@@ -2112,22 +1454,9 @@ def edit_bug(bug, applied_commits=None, fix_commits=None):
     comment = "".join(lines).strip()
     resolution = resolutions[0] if len(resolutions) > 0 else None
 
-    if resolution is None and len(changed_attachments) == 0 and comment == "":
+    if resolution is None and len(obsoleted_attachments) == 0 and comment == "":
         print "No changes, not editing Bug %d - %s" % (bug.id, bug.short_desc)
         return False
-
-    if fix_commits is not None:
-        if global_options.add_url:
-            # We don't want to add the URLs until the user has decided not to
-            # cancel the operation. But the comment that the user edited
-            # included commit IDs. If adding the URL changes the commit IDs
-            # we need to replace them in the comment.
-            old_ids = [(commit, commit.id[0:7]) for commit in fix_commits]
-            add_url(bug, fix_commits)
-            for commit, old_id in old_ids:
-                new_id = commit.id[0:7]
-                if new_id != old_id:
-                    comment = comment.replace(old_id, new_id)
 
     bug_changes = {}
     if resolution is not None:
@@ -2136,62 +1465,29 @@ def edit_bug(bug, applied_commits=None, fix_commits=None):
                 resolution = expand_abbreviation(resolution, legal_resolutions)
             except ValueError:
                 die("Bad resolution: %s" % resolution)
-        bug_changes['bug_status'] = 'RESOLVED'
         bug_changes['resolution'] = resolution
 
-    if comment != "":
-        if len(bug_changes) == 0 and len(changed_attachments) == 1:
-            # We can add the comment when we submit the attachment change.
-            # Bugzilla will add a helpful notation ad we'll only send out
-            # one set of email
-            pass # We'll put the comment with the attachment
-        else:
-            bug_changes['comment'] = comment
+    if comment:
+        # If we're updating the bug anyways, add the comment at the
+        # same time. If we're obsoleting multiple attachments at once,
+        # add the comment separately so that it isn't added once per
+        # attachment. See bug 1206797. Finally, if we are only adding
+        # a comment, make sure we update the bug.
+        if bug_changes or len(obsoleted_attachments) != 1:
+            bug_changes['comment'] = { 'body': comment }
+            comment = ''
 
-    # If we did the attachment updates first, we'd have to fetch a new
-    # token hash for the bug, since they'll change it. But each attachment
-    # has an individual token hash for just that attachment, so we can
-    # do the attachment updates afterwards.
-    if len(bug_changes) > 0:
-        bug.update(**bug_changes)
+    if bug_changes:
+        bug.update(bug_changes)
 
-    for (attachment_id, status) in changed_attachments.iteritems():
-        patch = None
-        if patches_have_status:
-            if legal_statuses:
-                try:
-                    status = expand_abbreviation(status, legal_statuses)
-                except ValueError:
-                    die("Bad patch status: %s" % status)
-        else:
-            if status != "obsolete":
-                die("Can't mark patch as '%s'; only obsolete is supported on %s" % (status,
-                                                                                    bug.server.host))
-        for p in bug.patches:
-            if p.attach_id == attachment_id:
-                patch = p
-        if not patch:
-            die("%d is not a valid attachment ID for Bug %d" % (attachment_id, bug.id))
-        attachment_changes = {}
-        if comment != "" and not 'comment' in bug_changes: # See above
-            attachment_changes['comment'] = comment
-        if status == 'obsolete':
-            attachment_changes['isobsolete'] = "1"
-        else:
-            attachment_changes['status'] = status
-        bug.update_patch(patch, **attachment_changes)
-        if status == 'obsolete':
-            print "Marked attachment as obsolete: %s - %s " % (patch.attach_id, patch.description)
-        else:
-            print "Changed status of attachment to %s: %s - %s" % (status, patch.attach_id, patch.description)
-
-    if fix_commits is not None:
-        attach_commits(bug, fix_commits, status='committed')
+    if obsoleted_attachments:
+        assert len(obsoleted_attachments) == 1 or not comment
+        bug.server.obsolete_attachments_by_id(obsoleted_attachments, comment)
 
     if resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
-    elif len(changed_attachments) > 0:
-        print "Updated bug %d - %s" % (bug.id, bug.short_desc)
+    elif len(obsoleted_attachments) > 0:
+        print "Obsoleted attachments on bug %d - %s" % (bug.id, bug.short_desc)
     else:
         print "Added comment to bug %d - %s" % (bug.id, bug.short_desc)
     print bug.get_url()
@@ -2249,10 +1545,6 @@ def extract_and_collate_bugs(commits):
 def do_edit(bug_reference_or_revision_range):
     try:
         handle = BugHandle.parse(bug_reference_or_revision_range)
-        if global_options.pushed:
-            die("--pushed can't be used together with a bug reference")
-        if global_options.fix is not None:
-            die("--fix requires commits to be specified")
         bug = Bug.load(handle)
         edit_bug(bug)
     except BugParseError, e:
@@ -2261,19 +1553,11 @@ def do_edit(bug_reference_or_revision_range):
         except CalledProcessError:
             die("'%s' isn't a valid bug reference or revision range" % bug_reference_or_revision_range)
 
-        if global_options.fix is not None:
-            handle = BugHandle.parse_or_die(global_options.fix)
+        # Process from oldest to newest
+        commits.reverse()
+        for handle, commits in extract_and_collate_bugs(commits):
             bug = Bug.load(handle)
-            edit_bug(bug, fix_commits=commits)
-        else:
-            # Process from oldest to newest
-            commits.reverse()
-            for handle, commits in extract_and_collate_bugs(commits):
-                bug = Bug.load(handle)
-                if global_options.pushed:
-                    edit_bug(bug, applied_commits=commits)
-                else:
-                    edit_bug(bug)
+            edit_bug(bug)
 
 PRODUCT_COMPONENT_HELP = """
 
@@ -2378,80 +1662,8 @@ def do_file(*args):
     attach_commits(bug, commits, fill_comment=fill_comment,
                    edit=global_options.edit)
 
-def run_push(*args, **kwargs):
-    # Predicting what 'git pushes' pushes based on the command line
-    # would be extraordinarily complex, but the interactive output goes
-    # to stderr and is somewhat ambiguous. We do the best we can parsing
-    # it. git 1.6.4 adds --porcelain to push, so we can use that eventually.
-    dry = kwargs['dry'] if 'dry' in kwargs else False
-    options = dict()
-    if dry:
-        options['dry'] = True
-    if global_options.force:
-        options['force'] = True
-    try:
-        options['_return_stderr']=True
-        out, err = git.push(*args, **options)
-    except CalledProcessError:
-        return
-    if not dry:
-        # Echo the output so the user gets feedback about what happened
-        print >>sys.stderr, err
-
-    commits = []
-    for line in err.strip().split("\n"):
-        #
-        # We only look for updates of existing branches; a much more complex
-        # handling would be look for all commits that weren't pushed to a
-        # remote branch. Hopefully the typical use of 'git bz push' is pushing
-        # a single commit to master.
-        #
-        #                 e5ad33e..febe0d4             master  ->   master
-        m = re.match(r"^\s*([a-f0-9]{6,}..[a-f0-9]{6,})\s+\S+\s*->\s*\S+\s*$", line)
-        if m:
-            branch_commits = get_commits(m.group(1))
-            # Process from oldest to newest
-            branch_commits.reverse()
-            commits += branch_commits
-
-    # Remove duplicate commits
-    seen_commit_ids = set()
-    unique_commits = []
-    for commit in commits:
-        if not commit.id in seen_commit_ids:
-            seen_commit_ids.add(commit.id)
-            unique_commits.append(commit)
-
-    return unique_commits
-
-def do_push(*args):
-    if global_options.fix:
-        handle = BugHandle.parse_or_die(global_options.fix)
-        bug = Bug.load(handle)
-
-        # We need the user to confirm before we add the URLs to the commits
-        # We need to add the URLs to the commits before we push
-        # We need to push in order to find out what commits we are pushing
-        # So, we push --dry first
-        options = { 'dry' : True }
-        commits = run_push(*args, **options)
-        if edit_bug(bug, fix_commits=commits):
-            run_push(*args)
-    else:
-        unique_commits = run_push(*args)
-        for handle, commits in extract_and_collate_bugs(unique_commits):
-            bug = Bug.load(handle)
-            edit_bug(bug, commits)
-
 def do_components(*args):
-    tracker = get_tracker()
-    host = resolve_host_alias(tracker)
-    https = tracker_uses_https(tracker)
-    path = tracker_get_path(tracker)
-    auth_user = tracker_get_auth_user(tracker)
-    auth_password = tracker_get_auth_password(tracker)
-
-    server = get_bug_server(host, path, https, auth_user, auth_password)
+    server = tracker_get_bug_server(get_tracker())
 
     if len(args) == 1:
         product = args[0]
@@ -2460,19 +1672,10 @@ def do_components(*args):
         if not product:
             die("<product> not specified and no default product is configured" + PRODUCT_COMPONENT_HELP)
 
-    product_id = server.product_id(product)
-    if product_id is None:
-        die("No such product " + product)
+    components = server.get_product_components(product)
+    for c in components:
+        print c
 
-    try:
-        response = server.get_xmlrpc_proxy().Bug.legal_values({'product_id': product_id, 'field': 'component'})
-        components = response['values']
-        for component in components:
-            print component
-    except xmlrpclib.Fault, e:
-        die(e.faultString)
-    except xmlrpclib.ProtocolError, e:
-        die("Unable to retrieve components: %s" % e.errmsg)
 
 ################################################################################
 
@@ -2496,10 +1699,6 @@ def add_add_url_options():
 def add_edit_option():
     parser.add_option("-e", "--edit", action="store_true",
                       help="allow editing the bugzilla comment")
-
-def add_fix_option():
-    parser.add_option("", "--fix", metavar="<bug reference>",
-                      help="attach commits and close bug")
 
 def add_requestee_option():
     parser.add_option("-r", "--requestee", action="store", dest="requestee",
@@ -2530,10 +1729,7 @@ elif command == 'components':
     max_args = 1
 elif command == 'edit':
     parser.set_usage("git bz edit [options] (<bug reference> | <commit> | <revision range>)");
-    parser.add_option("", "--pushed", action="store_true",
-                      help="pre-fill edit form treating the commits as pushed")
     add_add_url_options()
-    add_fix_option()
     min_args = max_args = 1
 elif command == 'file':
     parser.set_usage("git bz file [options] [[<product>]]/<component>] (<commit> | <revision range>)");
@@ -2542,16 +1738,8 @@ elif command == 'file':
     add_whitespace_option()
     min_args = 1
     max_args = 2
-elif command == 'push':
-    parser.set_usage("git bz push [options] [<repository> <refspec>...]");
-    add_add_url_options()
-    add_fix_option()
-    parser.add_option("-f", "--force", action="store_true",
-                      help="allow non-fast-forward commits")
-    min_args = 0
-    max_args = 1000 # no max
 else:
-    print >>sys.stderr, "Usage: git bz [add-url|apply|attach|components|edit|file|push] [options]"
+    print >>sys.stderr, "Usage: git bz [add-url|apply|attach|components|edit|file] [options]"
     sys.exit(1)
 
 global_options, args = parser.parse_args()
@@ -2572,12 +1760,8 @@ elif command == 'attach':
 elif command == 'components':
     do_components(*args)
 elif command == 'edit':
-    if global_options.pushed:
-        exit
     do_edit(*args)
 elif command == 'file':
     do_file(*args)
-elif command == 'push':
-    do_push(*args)
 
 sys.exit(0)
