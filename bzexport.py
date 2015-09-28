@@ -26,10 +26,6 @@ import urllib2
 import json
 from mercurial import config, demandimport, util
 from mercurial.i18n import _
-try:
-    import cPickle as pickle
-except:
-    import pickle
 import bz
 import bzauth
 
@@ -37,11 +33,6 @@ import bzauth
 demandimport.disable()
 import requests
 demandimport.enable()
-
-from auth import (
-    getbugzillaauth,
-    win_get_folder_path,
-)
 
 # For some reason hgexport calls the user cache the INI_CACHE_FILENAME.
 INI_CACHE_FILENAME = ".gitbz.user.cache"
