@@ -199,13 +199,13 @@ def rev_list_commits(*args, **kwargs):
     else:
         lines = output.split("\n")
     if (len(lines) % 3 != 0):
-        raise RuntimeException("git rev-list didn't return a number of lines divisible by 3")
+        raise RuntimeError("git rev-list didn't return a number of lines divisible by 3")
 
     result = []
     for i in xrange(0, len(lines), 3):
         m = re.match("commit\s+([A-Fa-f0-9]+)", lines[i])
         if not m:
-            raise RuntimeException("Can't parse commit it '%s'", lines[i])
+            raise RuntimeError("Can't parse commit it '%s'", lines[i])
         commit_id = m.group(1)
         author = lines[i + 1]
         subject = lines[i + 2]
