@@ -1539,6 +1539,10 @@ def extract_and_collate_bugs(commits):
     for commit in commits:
         for handle in extract_bugs_from_commit(commit):
             bugs_to_commits.setdefault(handle, []).append(commit)
+            # Only add the first bug from a commit, given that
+            # the standard Mozilla style is to put the actual
+            # bug number of the commit first.
+            break
 
     return bugs_to_commits.iteritems()
 
