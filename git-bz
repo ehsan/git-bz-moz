@@ -295,6 +295,12 @@ def get_add_url_ignore_remote_commits():
     except CalledProcessError:
         return False
 
+def get_auto_add_reviewers():
+    try:
+        return git.config('bz.auto-add-reviewers', get=True) == 'true'
+    except CalledProcessError:
+        return False
+
 
 # Per-tracker configuration variables
 # ===================================
@@ -1163,6 +1169,8 @@ def strip_bug_url(bug, commit_body):
 def edit_attachment_comment(bug, initial_description, initial_body, initial_comment):
     [no_reviewer_description, reviewers] = split_reviewer(initial_description)
 
+    auto_add_reviewers = get_auto_add_reviewers()
+
     template = StringIO()
     template.write("# Attachment to Bug %d - %s\n\n" % (bug.id, bug.short_desc))
     template.write("# Please edit the attachment description (first line) and comment (other lines).\n")
@@ -1177,7 +1185,9 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
     template.write(initial_body)
     template.write("\n\n")
     for r in reviewers:
-        template.write("#Review: :" + r + "\n")
+        if not auto_add_reviewers:
+            template.write("#")
+        template.write("Review: :" + r + "\n")
     try:
         for reviewer in git.config('bz.reviewer', get_all=True).split('\n'):
             template.write("#Review: %s\n" % reviewer)
