@@ -358,6 +358,13 @@ NOTE: these flags only work on bugzilla.mozilla.org at the moment, as they
 must be specified numerically.  (patches to improve this situation are welcome
 --@djmitche)
 
+[auto-add-reviewers]]
+ADDING REVIEWERS AUTOMATICALLY
+------------------------------
+If you want the submission text to add reviewers by default (so that you don't
+need to remove the leading pound manually every time), you can set the git
+config variable +bz.auto-add-reviewers+ to true.
+
 ALIASES
 -------
 You can create short aliases for different bug trackers as follows
