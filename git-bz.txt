@@ -9,7 +9,7 @@ SYNOPSIS
 --------
 [verse]
 'git bz add-url' <bug reference> (<commit> | <revision range>)
-'git bz apply' [-n | --no-add-url] <bug reference>
+'git bz apply' [-n | --no-add-url] [-r | --requestee <requestee>] <bug reference>
 'git bz attach' [-n | --no-add-url] [-e |--edit] [-w | --ignore-all-space] [<bug reference>] (<commit> | <revision range>)
 'git bz components' [<product>]
 'git bz edit' (<bug reference> | <commit> | <revision range>)
@@ -132,7 +132,7 @@ section <<add-url-method, ``Add URL Method''>> below for how to change this.
 apply
 ~~~~~
 
-'git bz apply' [-n | --no-add-url] <bug reference>
+'git bz apply' [-n | --no-add-url] [-r | --requestee <requestee>] <bug reference>
 
 For each patch attachment (except for obsolete patches) of the specified
 bug, prompts whether to apply. If prompt is agreed to runs 'git am' on
@@ -149,6 +149,20 @@ git bz apply bugzillla.gnome.org:1234
 The commit messages will automatically be rewritten to include a
 reference to the bug (see 'git bz add-url'). This can be suppressed
 with the -n/--no-add-url option.
+
+By default, all non-obsolete patches are candidates for apply. If the
+--requestee flag is used with a user's email address, only those attachments
+where the given email is a requestee on the patch are candidates for apply. All
+patches with other users as requestees, or those with no requestees (if they
+already have r+, for example) are automatically skipped. This can be used to
+pull down only the patches that you need to review.
+
+Example:
+
+----------------------------------------
+# Apply patches from bug 1234 that have r?user
+git bz apply -r user@mozilla.com 1234
+----------------------------------------
 
 attach
 ~~~~~~
