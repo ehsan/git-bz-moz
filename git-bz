@@ -79,6 +79,7 @@ from subprocess import Popen, CalledProcessError, PIPE
 import sys
 import tempfile
 import urlparse
+import urllib2
 
 
 # Globals
@@ -786,6 +787,23 @@ class Bug(object):
         self.short_desc = None
         self.patches = []
 
+    def _process_reviewboard_request(self, raw_attachment):
+        reviewboard_url = base64.b64decode(raw_attachment['data'])
+        rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
+        diff = urllib2.urlopen(rawdiff_url).read()
+
+        bug = BugAttachment(raw_attachment)
+
+        # Reviewboard patches are bare patches, so add the From/Date/Subject
+        # lines to help git detect the patch format.
+        bug.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
+            raw_attachment['creator'],
+            raw_attachment['creation_time'],
+            raw_attachment['description'].replace('MozReview Request: ', ''),
+            diff,
+        )
+        return bug
+
     def _load(self, bugid, attachment_data=False):
         buginfo = self.server.get_bug(bugid)
         self.id = buginfo['id']
@@ -798,11 +816,15 @@ class Bug(object):
 
         attachments = self.server.get_attachments(bugid, attachment_data=attachment_data)
         for a in attachments:
-            if not a["is_patch"]:
+            if a["content_type"] == u'text/x-review-board-request':
+                self.patches.append(self._process_reviewboard_request(a))
                 continue
-            if a["is_obsolete"]:
-                continue
-            self.patches.append(BugAttachment(a))
+            else:
+                if not a["is_patch"]:
+                    continue
+                if a["is_obsolete"]:
+                    continue
+                self.patches.append(BugAttachment(a))
 
     def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
         o = {
