@@ -788,20 +788,21 @@ class Bug(object):
         self.patches = []
 
     def _process_reviewboard_request(self, raw_attachment):
-        reviewboard_url = base64.b64decode(raw_attachment['data'])
-        rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
-        diff = urllib2.urlopen(rawdiff_url).read()
-
         bug = BugAttachment(raw_attachment)
 
-        # Reviewboard patches are bare patches, so add the From/Date/Subject
-        # lines to help git detect the patch format.
-        bug.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
-            raw_attachment['creator'],
-            raw_attachment['creation_time'],
-            raw_attachment['description'].replace('MozReview Request: ', ''),
-            diff,
-        )
+        if 'data' in raw_attachment:
+            reviewboard_url = base64.b64decode(raw_attachment['data'])
+            rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
+            diff = urllib2.urlopen(rawdiff_url).read()
+
+            # Reviewboard patches are bare patches, so add the From/Date/Subject
+            # lines to help git detect the patch format.
+            bug.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
+                raw_attachment['creator'],
+                raw_attachment['creation_time'],
+                raw_attachment['description'].replace('MozReview Request: ', ''),
+                diff,
+            )
         return bug
 
     def _load(self, bugid, attachment_data=False):
