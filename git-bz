@@ -771,9 +771,12 @@ class BugAttachment:
                 reviewboard_url = base64.b64decode(raw_attachment['data'])
                 rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
                 diff = urllib2.urlopen(rawdiff_url).read()
+            else:
+                diff = base64.b64decode(raw_attachment['data'])
 
-                # Reviewboard patches are bare patches, so add the
-                # From/Date/Subject lines to help git detect the patch format.
+            # If we have a raw diff, add the From/Date/Subject lines to help git
+            # detect the patch format.
+            if diff.startswith('diff '):
                 self.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
                     raw_attachment['creator'],
                     raw_attachment['creation_time'],
@@ -781,7 +784,7 @@ class BugAttachment:
                     diff,
                 )
             else:
-                self.data = base64.b64decode(raw_attachment['data'])
+                self.data = diff
         else:
             self.data = None
 
