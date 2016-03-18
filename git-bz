@@ -767,7 +767,24 @@ class BugAttachment:
         self.description = raw_attachment['summary']
         self.flag_requestees = set(flag.get('requestee') for flag in raw_attachment['flags'])
         if 'data' in raw_attachment:
-            self.data = base64.b64decode(raw_attachment['data'])
+            if raw_attachment['content_type'] == u'text/x-review-board-request':
+                reviewboard_url = base64.b64decode(raw_attachment['data'])
+                rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
+                diff = urllib2.urlopen(rawdiff_url).read()
+            else:
+                diff = base64.b64decode(raw_attachment['data'])
+
+            # If we have a raw diff, add the From/Date/Subject lines to help git
+            # detect the patch format.
+            if diff.startswith('diff '):
+                self.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
+                    raw_attachment['creator'],
+                    raw_attachment['creation_time'],
+                    raw_attachment['description'].replace('MozReview Request: ', ''),
+                    diff,
+                )
+            else:
+                self.data = diff
         else:
             self.data = None
 
@@ -787,24 +804,6 @@ class Bug(object):
         self.short_desc = None
         self.patches = []
 
-    def _process_reviewboard_request(self, raw_attachment):
-        bug = BugAttachment(raw_attachment)
-
-        if 'data' in raw_attachment:
-            reviewboard_url = base64.b64decode(raw_attachment['data'])
-            rawdiff_url = urlparse.urljoin(reviewboard_url, 'raw')
-            diff = urllib2.urlopen(rawdiff_url).read()
-
-            # Reviewboard patches are bare patches, so add the From/Date/Subject
-            # lines to help git detect the patch format.
-            bug.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
-                raw_attachment['creator'],
-                raw_attachment['creation_time'],
-                raw_attachment['description'].replace('MozReview Request: ', ''),
-                diff,
-            )
-        return bug
-
     def _load(self, bugid, attachment_data=False):
         buginfo = self.server.get_bug(bugid)
         self.id = buginfo['id']
@@ -817,14 +816,9 @@ class Bug(object):
 
         attachments = self.server.get_attachments(bugid, attachment_data=attachment_data)
         for a in attachments:
-            if a["content_type"] == u'text/x-review-board-request':
-                self.patches.append(self._process_reviewboard_request(a))
+            if a["is_obsolete"]:
                 continue
-            else:
-                if not a["is_patch"]:
-                    continue
-                if a["is_obsolete"]:
-                    continue
+            if a["is_patch"] or a["content_type"] == u'text/x-review-board-request':
                 self.patches.append(BugAttachment(a))
 
     def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
