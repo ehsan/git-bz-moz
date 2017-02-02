@@ -145,7 +145,7 @@ class bzAuth:
         j = res.json()
         if 'error' in j:
             raise Exception('REST error on %s to %s: %s' % (
-                method, url, j['message']))
+                method, url, unicode(j['message']).encode("utf-8")))
 
         return j
 

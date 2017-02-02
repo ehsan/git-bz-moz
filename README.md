@@ -18,3 +18,5 @@ The repository is located at https://hg.mozilla.org/hgcustom/version-control-too
   - auth.py is copied from pylib/mozhg/mozhg/
   - bz.py and bzauth.py are copied from hgext/bzexport/
   - bzexport.py is a few pieces of code copied from hgext/bzexport/__init__.py
+
+In addition, a patch to bzauth.py for bug 1336147 was manually applied.
