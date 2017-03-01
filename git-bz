@@ -781,7 +781,7 @@ class BugAttachment:
                     raw_attachment['creator'],
                     raw_attachment['creation_time'],
                     raw_attachment['description'].replace('MozReview Request: ', ''),
-                    diff,
+                    diff.decode('utf-8'),
                 )
             else:
                 self.data = diff
@@ -1154,7 +1154,7 @@ def do_apply(bug_reference):
 
         handle, filename = tempfile.mkstemp(".patch", make_filename(patch.description) + "-")
         f = os.fdopen(handle, "w")
-        f.write(patch.data)
+        f.write(patch.data.encode('utf-8'))
         f.close()
 
         try:
