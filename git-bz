@@ -691,6 +691,14 @@ class BugServer(object):
             print 'Error:', e
             exit(-1)
 
+    def get_user_detail(self, name):
+        try:
+            request = 'user?names=%s' % name
+            return self.auth.rest_request('GET', request)['users']
+        except mercurial.error.Abort, e:
+            print 'Error:', e
+            exit(-1)
+
     def get_bug(self, bugid):
         try:
             return bz.get_bug(self.auth, bugid)
@@ -762,7 +770,7 @@ def tracker_get_bug_server(tracker):
 
 
 class BugAttachment:
-    def __init__(self, raw_attachment):
+    def __init__(self, raw_attachment, server):
         self.attach_id = raw_attachment['id']
         self.description = raw_attachment['summary']
         self.flag_requestees = set(flag.get('requestee') for flag in raw_attachment['flags'])
@@ -777,8 +785,15 @@ class BugAttachment:
             # If we have a raw diff, add the From/Date/Subject lines to help git
             # detect the patch format.
             if diff.startswith('diff '):
-                self.data = "From: %s\nDate: %s\nSubject: %s\n%s" % (
-                    raw_attachment['creator'],
+                creator = server.get_user_detail(raw_attachment['creator'])[0]
+                real_name = creator['real_name']
+                # Normally symbols like [], (), <>, or : are used along with the
+                # user name to represent the user's status/timezone/irc nickname.
+                # Remove any of them before applying to the patch.
+                real_name = re.split(r"[\[(<:]", real_name)[0].strip()
+                self.data = "From: %s <%s>\nDate: %s\nSubject: %s\n%s" % (
+                    real_name,
+                    creator['name'],
                     raw_attachment['creation_time'],
                     raw_attachment['description'].replace('MozReview Request: ', ''),
                     diff.decode('utf-8'),
@@ -819,7 +834,7 @@ class Bug(object):
             if a["is_obsolete"]:
                 continue
             if a["is_patch"] or a["content_type"] == u'text/x-review-board-request':
-                self.patches.append(BugAttachment(a))
+                self.patches.append(BugAttachment(a, self.server))
 
     def create_patch(self, description, comment, filename, data, obsoletes=[], patch_flags={}):
         o = {
