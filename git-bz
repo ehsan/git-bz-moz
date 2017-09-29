@@ -693,7 +693,7 @@ class BugServer(object):
 
     def get_user_detail(self, name):
         try:
-            request = 'user?names=%s' % name
+            request = 'user?names=%s' % urllib2.quote(name, safe='~()*!.\'')
             return self.auth.rest_request('GET', request)['users']
         except mercurial.error.Abort, e:
             print 'Error:', e
