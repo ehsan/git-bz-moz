@@ -28,7 +28,7 @@ import re
 # any. If no reviewers were found, the description will just be the
 # one passed in.
 
-reviewer_pattern = re.compile("^(.+)\s+\(?r=([a-zA-Z0-9.,]+[a-zA-Z0-9])\)?\.?\s*$")
+reviewer_pattern = re.compile("^(.+)\s+\(?r=([a-zA-Z0-9.,\-]+[a-zA-Z0-9])\)?\.?\s*$")
 
 def split_reviewer(description):
     m = re.match(reviewer_pattern, description)
@@ -58,6 +58,7 @@ def get_split_reviewer_tests():
     tests.append(['Bug 1234 - whatever. (r=foo)   ', ['Bug 1234 - whatever.', ['foo']]]) # parentheses, trailing space
     tests.append(['Bug 1234 - whatever,   (r=foo) ', ['Bug 1234 - whatever', ['foo']]]) # parentheses, preceeded by comma.
     tests.append(['Bug 1234 - whatever. r=foo,bar,baz', ['Bug 1234 - whatever.', ['foo','bar','baz']]]) # multiple reviewers
+    tests.append(['Bug 1234 - whatever; r=build-peer', ['Bug 1234 - whatever', ['build-peer']]]) # dash in reviewer name
 
     return tests
 
