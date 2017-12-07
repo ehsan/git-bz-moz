@@ -20,3 +20,5 @@ The repository is located at https://hg.mozilla.org/hgcustom/version-control-too
   - bzexport.py is a few pieces of code copied from hgext/bzexport/__init__.py
 
 In addition, a patch to bzauth.py for bug 1336147 was manually applied.
+
+Note: this project requires the [Requests library](http://docs.python-requests.org/en/master/user/install/) to be installed.
