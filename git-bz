@@ -523,8 +523,8 @@ def edit_template(template):
     lines = filter(lambda x: not x.startswith("#"), f.readlines())
     f.close()
 
-    # Save the last file in a known location in case we fail to attach the
-    # patch for some reason.
+    # Save the last file in a known location in case something fails for
+    # some reason.
     tmpdir = tempfile.gettempdir()
     target = os.path.join(tmpdir, "git-bz-last.txt")
     if os.path.exists(target):
@@ -1324,50 +1324,6 @@ def edit_attachment_comment(bug, initial_description, initial_body, initial_comm
 
     return description, comment, commit_message, commit_body, obsoletes, patch_flags
 
-def attach_commits(bug, commits, fill_comment=True, edit=False):
-    # We want to attach the patches in chronological order
-    commits = list(commits)
-    commits.reverse()
-
-    if commits and commits[0].should_fold():
-        die("Can't fold first commit into non-existant commit above it.")
-
-    commit_ranges = []
-    for commit in commits:
-        if not commit.should_fold():
-            commit_ranges.append(GitCommitRange(commit))
-        else:
-            commit_ranges[-1].fold(commit)
-
-    for commit_range in commit_ranges:
-        filename = make_filename(commit_range.subject) + ".patch"
-        patch = get_patch(commit_range)
-        commit_body = get_body(commit_range)
-        if fill_comment:
-            comment = strip_bug_url(bug, commit_body)
-        else:
-            comment = None
-        if edit:
-            description, comment, commit_message, commit_body, obsoletes, patch_flags = \
-                edit_attachment_comment(bug, commit_range.subject, commit_body, comment)
-        else:
-            description = strip_bug_prefix(bug, commit_range.subject)
-            commit_message = commit_range.subject
-            obsoletes = []
-            patch_flags = {}
-        # Prepend the body
-        if commit_body:
-            patch = commit_body + "\n\n" + patch
-        # Prepend the commit message
-        if commit_message:
-            patch = commit_message + "\n\n" + patch
-        # Prepend the author information in HG patch format.
-        hgstring = '# HG changeset patch\n'
-        hgstring += "# User " + commit_range.author + '\n\n'
-        patch = hgstring + patch + '\n'
-
-        bug.create_patch(description, comment, filename, patch, obsoletes=obsoletes, patch_flags=patch_flags)
-
 def _get_commits_and_handle(args):
     if len(args) == 1:
         commit_or_revision_range = args[0]
@@ -1393,51 +1349,6 @@ def _get_commits_and_handle(args):
         commits = get_commits(commit_or_revision_range)
         handle = BugHandle.parse_or_die(bug_reference)
     return [commits, handle]
-
-def do_attach(*args):
-    commits, handle = _get_commits_and_handle(args)
-
-    bug = Bug.load(handle)
-
-    if global_options.add_url:
-        check_add_url(commits, bug.id, is_add_url=False)
-        add_url(bug, commits)
-        # Try to get the commits again, in case the user has used symbolic refs,
-        # to ensure that we pick the commits after the rebase.
-        commits, handle = _get_commits_and_handle(args)
-
-    # We always want to prompt if the user has specified multiple attachments.
-    # For the common case of one attachment don't prompt if we are going
-    # to give them a chance to edit and abort anyways.
-    if len(commits) > 1 or not global_options.edit:
-        template = StringIO()
-        template.write("""# Bug %(id)d - %(short_desc)s
-#
-# Lines starting with '#' will be ignored.  Delete everything to abort.
-#
-# Commits to be attached:
-
-""" % { 'id': bug.id, 'short_desc': bug.short_desc })
-
-        commit_lines = []
-        for commit in reversed(commits):
-            commit_line = commit.id[0:7] + " " + commit.subject + "\n"
-            commit_lines.append(commit_line)
-            template.write(commit_line)
-
-        lines = edit_template(template.getvalue()) # lines are not stripped.
-
-        to_attach = []
-        for commit_line, commit in zip(reversed(commit_lines), commits):
-            if commit_line in lines:
-                to_attach.append(commit)
-
-        if not to_attach:
-            die("No commits to attach, aborting")
-
-        commits = to_attach
-
-    attach_commits(bug, commits, edit=global_options.edit)
 
 def edit_bug(bug):
     newly_applied_patches = obsoleted_patches = set()
@@ -1675,7 +1586,6 @@ def do_file(*args):
 #
 # Product: %(product)s
 # Component: %(component)s
-# Patches to be attached:
 """ % { 'product': product, 'component': component })
     for commit in reversed(commits):
         template.write("#   " + commit.id[0:7] + " " + commit.subject + "\n")
@@ -1693,20 +1603,11 @@ def do_file(*args):
     # bug rather than the description for the attachment.
     if len(commits) == 1 and description == "":
         description = get_body(commits[0])
-        fill_comment = False
-    else:
-        fill_comment = True
 
     bug = Bug.create(get_tracker(), product, component, summary, description)
 
     if global_options.add_url:
         add_url(bug, commits)
-        # Try to get the commits again, in case the user has used symbolic refs,
-        # to ensure that we pick the commits after the rebase.
-        commits = get_commits(commit_or_revision_range)
-
-    attach_commits(bug, commits, fill_comment=fill_comment,
-                   edit=global_options.edit)
 
 def do_components(*args):
     server = tracker_get_bug_server(get_tracker())
@@ -1742,10 +1643,6 @@ def add_add_url_options():
     parser.add_option("-n", "--no-add-url", action="store_false", dest="add_url",
                       help="don't rewrite commits to add the bug URL")
 
-def add_edit_option():
-    parser.add_option("-e", "--edit", action="store_true",
-                      help="allow editing the bugzilla comment")
-
 def add_requestee_option():
     parser.add_option("-r", "--requestee", action="store", dest="requestee",
                       help="Only apply commits assigned to this requestee")
@@ -1762,13 +1659,6 @@ elif command == 'apply':
     add_add_url_options()
     add_requestee_option()
     min_args = max_args = 1
-elif command == 'attach':
-    parser.set_usage("git bz attach [options] [<bug reference>] (<commit> | <revision range>)");
-    add_add_url_options()
-    add_edit_option()
-    add_whitespace_option()
-    min_args = 1
-    max_args = 2
 elif command == 'components':
     parser.set_usage("git bz components [options] [<product>]");
     min_args = 0
@@ -1780,12 +1670,11 @@ elif command == 'edit':
 elif command == 'file':
     parser.set_usage("git bz file [options] [[<product>]]/<component>] (<commit> | <revision range>)");
     add_add_url_options()
-    add_edit_option()
     add_whitespace_option()
     min_args = 1
     max_args = 2
 else:
-    print >>sys.stderr, "Usage: git bz [add-url|apply|attach|components|edit|file] [options]"
+    print >>sys.stderr, "Usage: git bz [add-url|apply|components|edit|file] [options]"
     sys.exit(1)
 
 global_options, args = parser.parse_args()
@@ -1801,8 +1690,6 @@ if command == 'add-url':
     do_add_url(*args)
 elif command == 'apply':
     do_apply(*args)
-elif command == 'attach':
-    do_attach(*args)
 elif command == 'components':
     do_components(*args)
 elif command == 'edit':
