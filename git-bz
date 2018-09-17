@@ -1169,7 +1169,7 @@ def do_apply(bug_reference):
 
         handle, filename = tempfile.mkstemp(".patch", make_filename(patch.description) + "-")
         f = os.fdopen(handle, "w")
-        f.write(patch.data.encode('utf-8'))
+        f.write(patch.data)
         f.close()
 
         try:
