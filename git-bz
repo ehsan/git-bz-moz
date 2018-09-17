@@ -914,6 +914,7 @@ class Bug(object):
         bug_fields['summary'] = summary
         bug_fields['description'] = description
         bug_fields['assigned_to'] = assignee
+        bug_fields['bug_status'] = 'ASSIGNED'
 
         bug_id = server.create_bug(bug_fields)
 
@@ -929,9 +930,7 @@ class Bug(object):
         bug.short_desc = summary.rstrip()
         bug.assignee = assignee
 
-        # bug.bug_status and bug.resolution are not set. We can't tell
-        # if bug_status is UNCONFIRMED or NEW. Hopefully neither will
-        # be needed.
+        # bug.resolution is not set.
 
         if False:
             # Debugging check that we are setting values that match the server.
@@ -1374,6 +1373,11 @@ def edit_bug(bug):
             commit = newly_applied_patches[patch]
             template.write("Attachment %d pushed as %s - %s\n" % (patch.attach_id, commit.id[0:7], commit.subject))
 
+    legal_statuses = bug.server.legal_field_values('bug_status')
+    template.write("\n# Uncomment to change the bug status\n")
+    template.write("# possible status values: %s\n" % abbreviation_help_string(legal_statuses))
+    template.write("# Status: %s\n" % bug.bug_status)
+
     template.write("\n# Uncomment to change the assignee\n")
     template.write("# Assignee: %s\n" % bug.assignee)
 
@@ -1398,6 +1402,10 @@ def edit_bug(bug):
     lines = edit_template(template.getvalue())
 
     def filter_line(line):
+        m = re.match("^\s*Status\s*:\s*(\S+)", line)
+        if m:
+            statuses.append(m.group(1))
+            return False
         m = re.match("^\s*Assignee\s*:\s*(\S+)", line)
         if m:
             assignees.append(m.group(1))
@@ -1415,20 +1423,30 @@ def edit_bug(bug):
         return True
 
     obsoleted_attachments = []
+    statuses = []
     assignees = []
     resolutions = []
 
     lines = filter(filter_line, lines)
 
     comment = "".join(lines).strip()
+    status = statuses[0] if len(statuses) > 0 else None
     assignee = assignees[0] if len(assignees) > 0 else None
     resolution = resolutions[0] if len(resolutions) > 0 else None
 
-    if assignee is None and resolution is None and len(obsoleted_attachments) == 0 and comment == "":
+    if status is None and assignee is None and resolution is None and len(obsoleted_attachments) == 0 and comment == "":
         print "No changes, not editing Bug %d - %s" % (bug.id, bug.short_desc)
         return False
 
     bug_changes = {}
+    if status is not None:
+        if legal_statuses:
+            try:
+                status = expand_abbreviation(status, legal_statuses)
+            except ValueError:
+                die("Bad status: %s" % status)
+        bug_changes['bug_status'] = status
+
     if assignee is not None:
         bug_changes['assigned_to'] = assignee
 
@@ -1458,7 +1476,9 @@ def edit_bug(bug):
         bug.server.obsolete_attachments_by_id(obsoleted_attachments, comment)
 
 
-    if assignee is not None:
+    if status is not None:
+        print "Set status to %s on bug %d - %s" % (status, bug.id, bug.short_desc)
+    elif assignee is not None:
         print "Set assignee to %s on bug %d - %s" % (assignee, bug.id, bug.short_desc)
     elif resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
