@@ -243,6 +243,9 @@ def get_patch(commit_or_range):
 def get_body(commit_or_range):
     return git.log(commit_or_range.commit_range(), pretty="format:%b")
 
+def get_author(commit_or_range):
+    return git.log(commit_or_range.commit_range(), pretty="format:%ae").split("\n")[0]
+
 def commit_is_merge(commit):
     contents = git.cat_file("commit", commit.id)
     parent_count = 0
@@ -817,6 +820,7 @@ class Bug(object):
         self.product = None
         self.component = None
         self.short_desc = None
+        self.assignee = None
         self.patches = []
 
     def _load(self, bugid, attachment_data=False):
@@ -825,6 +829,7 @@ class Bug(object):
         self.product = buginfo['product']
         self.component = buginfo['component']
         self.short_desc = buginfo['summary']
+        self.assignee = buginfo['assigned_to']
         self.bug_status = buginfo['status']
         if self.bug_status == "RESOLVED":
             self.resolution = buginfo['resolution']
@@ -895,7 +900,7 @@ class Bug(object):
         return bug
 
     @staticmethod
-    def create(tracker, product, component, summary, description):
+    def create(tracker, product, component, assignee, summary, description):
         server = tracker_get_bug_server(tracker)
         default_fields = get_default_fields(tracker)
 
@@ -908,6 +913,7 @@ class Bug(object):
         bug_fields['component'] = component
         bug_fields['summary'] = summary
         bug_fields['description'] = description
+        bug_fields['assigned_to'] = assignee
 
         bug_id = server.create_bug(bug_fields)
 
@@ -921,6 +927,7 @@ class Bug(object):
         bug.product = product
         bug.component = component
         bug.short_desc = summary.rstrip()
+        bug.assignee = assignee
 
         # bug.bug_status and bug.resolution are not set. We can't tell
         # if bug_status is UNCONFIRMED or NEW. Hopefully neither will
@@ -934,6 +941,7 @@ class Bug(object):
             assert bug.product == bug2.product
             assert bug.component == bug2.component
             assert bug.short_desc == bug2.short_desc
+            assert bug.assignee == bug2.assignee
 
         print "Bug %d - %s" % (bug.id, summary)
         print bug.get_url()
@@ -1366,10 +1374,13 @@ def edit_bug(bug):
             commit = newly_applied_patches[patch]
             template.write("Attachment %d pushed as %s - %s\n" % (patch.attach_id, commit.id[0:7], commit.subject))
 
+    template.write("\n# Uncomment to change the assignee\n")
+    template.write("# Assignee: %s\n" % bug.assignee)
+
     if bug.bug_status == "RESOLVED":
-        template.write("# Uncommment and edit to change resolution\n")
+        template.write("\n# Uncommment and edit to change resolution\n")
     else:
-        template.write("# Uncomment to resolve bug\n")
+        template.write("\n# Uncomment to resolve bug\n")
     legal_resolutions = bug.server.legal_field_values('resolution')
     if legal_resolutions:
         # Require non-empty resolution. DUPLICATE, MOVED would need special support
@@ -1387,6 +1398,10 @@ def edit_bug(bug):
     lines = edit_template(template.getvalue())
 
     def filter_line(line):
+        m = re.match("^\s*Assignee\s*:\s*(\S+)", line)
+        if m:
+            assignees.append(m.group(1))
+            return False
         m = re.match("^\s*Resolution\s*:\s*(\S+)", line)
         if m:
             resolutions.append(m.group(1))
@@ -1400,18 +1415,23 @@ def edit_bug(bug):
         return True
 
     obsoleted_attachments = []
+    assignees = []
     resolutions = []
 
     lines = filter(filter_line, lines)
 
     comment = "".join(lines).strip()
+    assignee = assignees[0] if len(assignees) > 0 else None
     resolution = resolutions[0] if len(resolutions) > 0 else None
 
-    if resolution is None and len(obsoleted_attachments) == 0 and comment == "":
+    if assignee is None and resolution is None and len(obsoleted_attachments) == 0 and comment == "":
         print "No changes, not editing Bug %d - %s" % (bug.id, bug.short_desc)
         return False
 
     bug_changes = {}
+    if assignee is not None:
+        bug_changes['assigned_to'] = assignee
+
     if resolution is not None:
         if legal_resolutions:
             try:
@@ -1437,7 +1457,10 @@ def edit_bug(bug):
         assert len(obsoleted_attachments) == 1 or not comment
         bug.server.obsolete_attachments_by_id(obsoleted_attachments, comment)
 
-    if resolution is not None:
+
+    if assignee is not None:
+        print "Set assignee to %s on bug %d - %s" % (assignee, bug.id, bug.short_desc)
+    elif resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
     elif len(obsoleted_attachments) > 0:
         print "Obsoleted attachments on bug %d - %s" % (bug.id, bug.short_desc)
@@ -1604,7 +1627,9 @@ def do_file(*args):
     if len(commits) == 1 and description == "":
         description = get_body(commits[0])
 
-    bug = Bug.create(get_tracker(), product, component, summary, description)
+    author = get_author(commits)
+
+    bug = Bug.create(get_tracker(), product, component, assignee, summary, description)
 
     if global_options.add_url:
         add_url(bug, commits)
