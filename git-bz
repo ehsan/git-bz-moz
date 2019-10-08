@@ -244,6 +244,8 @@ def get_body(commit_or_range):
     return git.log(commit_or_range.commit_range(), pretty="format:%b")
 
 def get_author(commit_or_range):
+    if type(commit_or_range) is list:
+      commit_or_range = commit_or_range[0]
     return git.log(commit_or_range.commit_range(), pretty="format:%ae").split("\n")[0]
 
 def commit_is_merge(commit):
@@ -1649,7 +1651,7 @@ def do_file(*args):
 
     author = get_author(commits)
 
-    bug = Bug.create(get_tracker(), product, component, assignee, summary, description)
+    bug = Bug.create(get_tracker(), product, component, author, summary, description)
 
     if global_options.add_url:
         add_url(bug, commits)
