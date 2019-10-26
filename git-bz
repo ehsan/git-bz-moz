@@ -835,6 +835,7 @@ class Bug(object):
         self.bug_status = buginfo['status']
         if self.bug_status == "RESOLVED":
             self.resolution = buginfo['resolution']
+        self.type = buginfo['type']
 
         attachments = self.server.get_attachments(bugid, attachment_data=attachment_data)
         for a in attachments:
@@ -917,6 +918,7 @@ class Bug(object):
         bug_fields['description'] = description
         bug_fields['assigned_to'] = assignee
         bug_fields['bug_status'] = 'ASSIGNED'
+        bug_fields['type'] = 'defect'
 
         bug_id = server.create_bug(bug_fields)
 
@@ -1394,6 +1396,13 @@ def edit_bug(bug):
         template.write("# possible resolutions: %s\n" % abbreviation_help_string(legal_resolutions))
     template.write("# Resolution: FIXED\n")
 
+    # This API isn't implemented on the server...
+    # legal_types = bug.server.legal_field_values('type')
+    legal_types = ["defect", "enhancement", "task"]
+    template.write("\n# Uncomment to change the bug type\n")
+    template.write("# Type: %s\n" % bug.type)
+    template.write("# possible type values: %s\n" % abbreviation_help_string(legal_types))
+
     if len(bug.patches) > 0:
         template.write("\n# To mark patches obsolete, uncomment below\n")
         for patch in bug.patches:
@@ -1416,6 +1425,10 @@ def edit_bug(bug):
         if m:
             resolutions.append(m.group(1))
             return False
+        m = re.match("^\s*Type\s*:\s*(\S+)", line)
+        if m:
+            types.append(m.group(1))
+            return False
         m = re.match("^\s*(\S+)\s*@\s*(\d+)", line)
         if m:
             status = m.group(1)
@@ -1428,6 +1441,7 @@ def edit_bug(bug):
     statuses = []
     assignees = []
     resolutions = []
+    types = []
 
     lines = filter(filter_line, lines)
 
@@ -1435,8 +1449,9 @@ def edit_bug(bug):
     status = statuses[0] if len(statuses) > 0 else None
     assignee = assignees[0] if len(assignees) > 0 else None
     resolution = resolutions[0] if len(resolutions) > 0 else None
+    type = types[0] if len(types) > 0 else None
 
-    if status is None and assignee is None and resolution is None and len(obsoleted_attachments) == 0 and comment == "":
+    if status is None and assignee is None and resolution is None and type is None and len(obsoleted_attachments) == 0 and comment == "":
         print "No changes, not editing Bug %d - %s" % (bug.id, bug.short_desc)
         return False
 
@@ -1459,6 +1474,14 @@ def edit_bug(bug):
             except ValueError:
                 die("Bad resolution: %s" % resolution)
         bug_changes['resolution'] = resolution
+
+    if type is not None:
+        if legal_types:
+            try:
+                type = expand_abbreviation(type, legal_types)
+            except ValueError:
+                die("Bad type: %s" % type)
+        bug_changes['type'] = type
 
     if comment:
         # If we're updating the bug anyways, add the comment at the
@@ -1484,6 +1507,8 @@ def edit_bug(bug):
         print "Set assignee to %s on bug %d - %s" % (assignee, bug.id, bug.short_desc)
     elif resolution is not None:
         print "Resolved as %s bug %d - %s" % (resolution, bug.id, bug.short_desc)
+    elif type is not None:
+        print "Set type to %s on bug %d - %s" % (type, bug.id, bug.short_desc)
     elif len(obsoleted_attachments) > 0:
         print "Obsoleted attachments on bug %d - %s" % (bug.id, bug.short_desc)
     else:
